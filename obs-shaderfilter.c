@@ -23,6 +23,7 @@
 #include <sys/time.h>
 #endif
 
+#include "pocketfft.h"
 #include "version.h"
 
 float (*move_get_transition_filter)(obs_source_t *filter_from, obs_source_t **filter_to) = NULL;
@@ -2079,6 +2080,66 @@ static bool shader_filter_convert(obs_properties_t *props, obs_property_t *prope
 }
 
 static const char *shader_filter_texture_file_filter = "Textures (*.bmp *.tga *.png *.jpeg *.jpg *.gif);;";
+
+// These functions go into your obs-shaderfilter.c or a new .c/.h file.
+// This example assumes OBS 27+ and you're working in a filter context.
+
+#include <obs-module.h>
+
+static obs_source_t *selected_audio_source = NULL;
+
+// --- Step 1: Property to select an audio source ---
+obs_property_t *add_audio_source_selector(obs_properties_t *props) {
+  obs_property_t *list =
+      obs_properties_add_list(props, "audio_source", "Audio Source", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+
+  obs_source_t *source = NULL;
+  for (size_t i = 0; i < obs_enum_sources(); i++) {
+    source = obs_enum_sources()[i];
+    const char *name = obs_source_get_name(source);
+    enum obs_source_type type = obs_source_get_type(source);
+    if (type == OBS_SOURCE_TYPE_INPUT || type == OBS_SOURCE_TYPE_FILTER) {
+      obs_property_list_add_string(list, name, name);
+    }
+  }
+
+  return list;
+}
+
+// --- Step 2: Audio callback and registration ---
+
+// Called every time audio data is available from the selected source
+static void on_audio_frame(void *param, struct audio_data *audio) {
+  UNUSED_PARAMETER(param);
+
+  // Example: Access 1st channel, 1024 float samples
+  const float *samples = (const float *)audio->data[0];
+  size_t sample_count = audio->frames;
+
+  // TODO: Insert FFT or energy analysis logic here
+  // e.g., compute RMS or bandpass filter samples
+}
+
+void register_audio_callback(const char *source_name) {
+  if (selected_audio_source) {
+    obs_source_remove_audio_capture_callback(selected_audio_source, on_audio_frame, NULL);
+    obs_source_release(selected_audio_source);
+    selected_audio_source = NULL;
+  }
+
+  selected_audio_source = obs_get_source_by_name(source_name);
+  if (selected_audio_source) {
+    obs_source_add_audio_capture_callback(selected_audio_source, on_audio_frame, NULL);
+  }
+}
+
+// --- Step 3: Respond to settings update (user changes audio source) ---
+void shader_filter_update(obs_data_t *settings) {
+  const char *src_name = obs_data_get_string(settings, "audio_source");
+  if (src_name && *src_name) {
+    register_audio_callback(src_name);
+  }
+}
 
 static obs_properties_t *shader_filter_properties(void *data)
 {

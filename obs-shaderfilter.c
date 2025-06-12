@@ -23,7 +23,7 @@
 #include <sys/time.h>
 #endif
 
-#include "pocketfft.h"
+#include "kiss_fft.h"
 #include "version.h"
 
 float (*move_get_transition_filter)(obs_source_t *filter_from, obs_source_t **filter_to) = NULL;
@@ -2081,12 +2081,15 @@ static bool shader_filter_convert(obs_properties_t *props, obs_property_t *prope
 
 static const char *shader_filter_texture_file_filter = "Textures (*.bmp *.tga *.png *.jpeg *.jpg *.gif);;";
 
-// These functions go into your obs-shaderfilter.c or a new .c/.h file.
-// This example assumes OBS 27+ and you're working in a filter context.
-
-#include <obs-module.h>
 
 static obs_source_t *selected_audio_source = NULL;
+
+#define FFT_SIZE 1024
+#define NUM_BANDS 64
+static kiss_fft_cpx fft_in[FFT_SIZE];
+static kiss_fft_cpx fft_out[FFT_SIZE];
+static float fft_bands[NUM_BANDS];
+static kiss_fft_cfg fft_cfg = NULL;
 
 // --- Step 1: Property to select an audio source ---
 obs_property_t *add_audio_source_selector(obs_properties_t *props) {
@@ -2112,12 +2115,48 @@ obs_property_t *add_audio_source_selector(obs_properties_t *props) {
 static void on_audio_frame(void *param, struct audio_data *audio) {
   UNUSED_PARAMETER(param);
 
-  // Example: Access 1st channel, 1024 float samples
   const float *samples = (const float *)audio->data[0];
   size_t sample_count = audio->frames;
 
-  // TODO: Insert FFT or energy analysis logic here
-  // e.g., compute RMS or bandpass filter samples
+  if (sample_count < FFT_SIZE)
+    return;
+
+  for (size_t i = 0; i < FFT_SIZE; i++) {
+    float multiplier = 0.5f * (1.0f - cosf((2.0f * (float)M_PI * i) / (FFT_SIZE - 1)));
+    fft_in[i].r = samples[i] * multiplier;
+    fft_in[i].i = 0.0f;
+  }
+
+  kiss_fft(fft_cfg, fft_in, fft_out);
+
+  float magnitude[FFT_SIZE / 2];
+  for (size_t i = 0; i < FFT_SIZE / 2; i++) {
+    magnitude[i] = sqrtf(fft_out[i].r * fft_out[i].r + fft_out[i].i * fft_out[i].i);
+  }
+
+  float max_freq = 24000.0f;
+  float log_min = log10f(20.0f);
+  float log_max = log10f(max_freq);
+
+  for (int b = 0; b < NUM_BANDS; b++) {
+    float log_start = log_min + ((float)b / NUM_BANDS) * (log_max - log_min);
+    float log_end = log_min + ((float)(b + 1) / NUM_BANDS) * (log_max - log_min);
+    float start_hz = powf(10.0f, log_start);
+    float end_hz = powf(10.0f, log_end);
+
+    int start_bin = (int)(start_hz / (max_freq / (FFT_SIZE / 2)));
+    int end_bin = (int)(end_hz / (max_freq / (FFT_SIZE / 2)));
+    if (end_bin >= FFT_SIZE / 2)
+      end_bin = FFT_SIZE / 2 - 1;
+
+    float sum = 0.0f;
+    for (int i = start_bin; i <= end_bin; i++) {
+      sum += magnitude[i];
+    }
+    fft_bands[b] = sum / (end_bin - start_bin + 1);
+  }
+
+  // TODO: send fft_bands to shader as uniform array
 }
 
 void register_audio_callback(const char *source_name) {
@@ -2135,6 +2174,9 @@ void register_audio_callback(const char *source_name) {
 
 // --- Step 3: Respond to settings update (user changes audio source) ---
 void shader_filter_update(obs_data_t *settings) {
+  if (!fft_cfg)
+    fft_cfg = kiss_fft_alloc(FFT_SIZE, 0, NULL, NULL);
+
   const char *src_name = obs_data_get_string(settings, "audio_source");
   if (src_name && *src_name) {
     register_audio_callback(src_name);

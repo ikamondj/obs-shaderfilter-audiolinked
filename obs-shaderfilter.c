@@ -121,7 +121,6 @@ struct effect_param_data {
 	struct dstr name;
 	struct dstr display_name;
 	struct dstr widget_type;
-	struct dstr description;
 	struct dstr group;
 	struct dstr path;
 	DARRAY(int) option_values;
@@ -170,6 +169,7 @@ struct shader_filter_data {
 	obs_source_t *context;
 	gs_effect_t *effect;
 	gs_effect_t *output_effect;
+	gs_vertbuffer_t *sprite_buffer;
 
 	gs_texrender_t *input_texrender;
 	gs_texrender_t *previous_input_texrender;
@@ -193,6 +193,7 @@ struct shader_filter_data {
 	float shader_active_time;
 	float shader_enable_time;
 	bool enabled;
+	bool use_template;
 
 	gs_eparam_t *param_uv_offset;
 	gs_eparam_t *param_uv_scale;
@@ -270,7 +271,6 @@ static unsigned int rand_interval(unsigned int min, unsigned int max)
 
 static char *load_shader_from_file(const char *file_name) // add input of visited files
 {
-
 	char *file_ptr = os_quick_read_utf8_file(file_name);
 	if (file_ptr == NULL) {
 		blog(LOG_WARNING, "[obs-shaderfilter] failed to read file: %s", file_name);
@@ -392,7 +392,6 @@ static void shader_filter_clear_params(struct shader_filter_data *filter)
 		dstr_free(&param->name);
 		dstr_free(&param->display_name);
 		dstr_free(&param->widget_type);
-		dstr_free(&param->description);
 		dstr_free(&param->group);
 		dstr_free(&param->path);
 		da_free(param->option_values);
@@ -451,6 +450,22 @@ static void load_output_effect(struct shader_filter_data *filter)
 	}
 }
 
+static void load_sprite_buffer(struct shader_filter_data *filter)
+{
+	if (filter->sprite_buffer)
+		return;
+	struct gs_vb_data *vbd = gs_vbdata_create();
+	vbd->num = 4;
+	vbd->points = bmalloc(sizeof(struct vec3) * 4);
+	vbd->num_tex = 1;
+	vbd->tvarray = bmalloc(sizeof(struct gs_tvertarray));
+	vbd->tvarray[0].width = 2;
+	vbd->tvarray[0].array = bmalloc(sizeof(struct vec2) * 4);
+	memset(vbd->points, 0, sizeof(struct vec3) * 4);
+	memset(vbd->tvarray[0].array, 0, sizeof(struct vec2) * 4);
+	filter->sprite_buffer = gs_vertexbuffer_create(vbd, GS_DYNAMIC);
+}
+
 static void shader_filter_reload_effect(struct shader_filter_data *filter)
 {
 	obs_data_t *settings = obs_source_get_settings(filter->context);
@@ -485,6 +500,7 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 		shader_text = bstrdup(obs_data_get_string(settings, "shader_text"));
 		use_template = true;
 	}
+	filter->use_template = use_template;
 
 	struct dstr effect_text = {0};
 
@@ -720,7 +736,8 @@ static void shader_filter_destroy(void *data)
 		gs_texrender_destroy(filter->previous_input_texrender);
 	if (filter->previous_output_texrender)
 		gs_texrender_destroy(filter->previous_output_texrender);
-
+	if (filter->sprite_buffer)
+		gs_vertexbuffer_destroy(filter->sprite_buffer);
 	obs_leave_graphics();
 
 	dstr_free(&filter->last_path);
@@ -3019,6 +3036,25 @@ void shader_filter_set_effect_params(struct shader_filter_data *filter)
 	}
 }
 
+static void build_sprite(struct gs_vb_data *data, float fcx, float fcy, float start_u, float end_u, float start_v, float end_v)
+{
+	struct vec2 *tvarray = data->tvarray[0].array;
+
+	vec3_zero(data->points);
+	vec3_set(data->points + 1, fcx, 0.0f, 0.0f);
+	vec3_set(data->points + 2, 0.0f, fcy, 0.0f);
+	vec3_set(data->points + 3, fcx, fcy, 0.0f);
+	vec2_set(tvarray, start_u, start_v);
+	vec2_set(tvarray + 1, end_u, start_v);
+	vec2_set(tvarray + 2, start_u, end_v);
+	vec2_set(tvarray + 3, end_u, end_v);
+}
+
+static inline void build_sprite_norm(struct gs_vb_data *data, float fcx, float fcy)
+{
+	build_sprite(data, fcx, fcy, 0.0f, 1.0f, 0.0f, 1.0f);
+}
+
 static void render_shader(struct shader_filter_data *filter, float f, obs_source_t *filter_to)
 {
 	gs_texture_t *texture = gs_texrender_get_texture(filter->input_texrender);
@@ -3150,8 +3186,21 @@ static void render_shader(struct shader_filter_data *filter, float f, obs_source
 
 	if (gs_texrender_begin(filter->output_texrender, filter->total_width, filter->total_height)) {
 		gs_ortho(0.0f, (float)filter->total_width, 0.0f, (float)filter->total_height, -100.0f, 100.0f);
-		while (gs_effect_loop(filter->effect, "Draw"))
-			gs_draw_sprite(texture, 0, filter->total_width, filter->total_height);
+		while (gs_effect_loop(filter->effect, "Draw")) {
+			if (filter->use_template) {
+				gs_draw_sprite(texture, 0, filter->total_width, filter->total_height);
+			} else {
+				if (!filter->sprite_buffer)
+					load_sprite_buffer(filter);
+
+				struct gs_vb_data *data = gs_vertexbuffer_get_data(filter->sprite_buffer);
+				build_sprite_norm(data, (float)filter->total_width, (float)filter->total_height);
+				gs_vertexbuffer_flush(filter->sprite_buffer);
+				gs_load_vertexbuffer(filter->sprite_buffer);
+				gs_load_indexbuffer(NULL);
+				gs_draw(GS_TRISTRIP, 0, 0);
+			}
+		}
 		gs_texrender_end(filter->output_texrender);
 	}
 

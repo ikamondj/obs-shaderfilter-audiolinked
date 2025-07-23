@@ -24,6 +24,9 @@
 #endif
 
 #include "kiss_fft.h"
+#include "kiss_fftr.h"
+#include <math.h>
+
 #include "version.h"
 
 float (*move_get_transition_filter)(obs_source_t *filter_from, obs_source_t **filter_to) = NULL;
@@ -46,6 +49,15 @@ uniform float elapsed_time_start;\n\
 uniform float elapsed_time_show;\n\
 uniform float elapsed_time_active;\n\
 uniform float elapsed_time_enable;\n\
+uniform float bass_strength;\n\
+uniform float low_mid_strength;\n\
+uniform float high_mid_strength;\n\
+uniform float treble_strength;\n\
+uniform float bass_stateful;\n\
+uniform float low_mid_stateful;\n\
+uniform float high_mid_stateful;\n\
+uniform float treble_stateful;\n\
+uniform float fft_bands[64];\n\
 uniform int loops;\n\
 uniform float loop_second;\n\
 uniform float local_time;\n\
@@ -195,6 +207,16 @@ struct shader_filter_data {
 	bool enabled;
 	bool use_template;
 
+	float bass_strength;
+    float low_mid_strength;
+    float high_mid_strength;
+    float treble_strength;
+	float bass_stateful;
+    float low_mid_stateful;
+    float high_mid_stateful;
+    float treble_stateful;
+    float fft_bands[64];
+
 	gs_eparam_t *param_uv_offset;
 	gs_eparam_t *param_uv_scale;
 	gs_eparam_t *param_uv_pixel_interval;
@@ -226,6 +248,15 @@ struct shader_filter_data {
 	gs_eparam_t *param_transition_time;
 	gs_eparam_t *param_convert_linear;
 	gs_eparam_t *param_previous_output;
+	gs_eparam_t *param_bass_strength;
+	gs_eparam_t *param_low_mid_strength;
+	gs_eparam_t *param_high_mid_strength;
+	gs_eparam_t *param_treble_strength;
+	gs_eparam_t *param_bass_stateful;
+    gs_eparam_t *param_low_mid_stateful;
+    gs_eparam_t *param_high_mid_stateful;
+    gs_eparam_t *param_treble_stateful;
+    gs_eparam_t *param_fft_bands;
 
 	int expand_left;
 	int expand_right;
@@ -359,6 +390,15 @@ static void shader_filter_clear_params(struct shader_filter_data *filter)
 	filter->param_transition_time = NULL;
 	filter->param_convert_linear = NULL;
 	filter->param_previous_output = NULL;
+    filter->param_bass_stateful = NULL;
+    filter->param_low_mid_stateful = NULL;
+    filter->param_high_mid_stateful = NULL;
+    filter->param_treble_stateful = NULL;
+    filter->param_bass_strength = NULL;
+    filter->param_low_mid_strength = NULL;
+    filter->param_high_mid_strength = NULL;
+    filter->param_treble_strength = NULL;
+    filter->param_fft_bands = NULL;
 
 	size_t param_count = filter->stored_param_list.num;
 	for (size_t param_index = 0; param_index < param_count; param_index++) {
@@ -601,7 +641,34 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 			filter->param_elapsed_time_active = param;
 		} else if (strcmp(info.name, "elapsed_time_enable") == 0) {
 			filter->param_elapsed_time_enable = param;
-		} else if (strcmp(info.name, "rand_f") == 0) {
+        }
+        else if (strcmp(info.name, "bass_strength") == 0) {
+          filter->param_bass_strength = param;
+        }
+        else if (strcmp(info.name, "bass_stateful") == 0) {
+          filter->param_bass_stateful = param;
+        }
+        else if (strcmp(info.name, "low_mid_strength") == 0) {
+          filter->param_low_mid_strength = param;
+        }
+        else if (strcmp(info.name, "low_mid_stateful") == 0) {
+          filter->param_low_mid_stateful = param;
+        }
+        else if (strcmp(info.name, "high_mid_strength") == 0) {
+          filter->param_high_mid_strength = param;
+        }
+        else if (strcmp(info.name, "high_mid_stateful") == 0) {
+          filter->param_high_mid_stateful = param;
+        }
+        else if (strcmp(info.name, "treble_strength") == 0) {
+          filter->param_treble_strength = param;
+        }
+        else if (strcmp(info.name, "treble_stateful") == 0) {
+          filter->param_treble_stateful = param;
+        } else if (strcmp(info.name, "fft_bands") == 0) {
+          filter->param_fft_bands = param;
+        }
+		else if (strcmp(info.name, "rand_f") == 0) {
 			filter->param_rand_f = param;
 		} else if (strcmp(info.name, "rand_activation_f") == 0) {
 			filter->param_rand_activation_f = param;
@@ -2099,107 +2166,6 @@ static bool shader_filter_convert(obs_properties_t *props, obs_property_t *prope
 static const char *shader_filter_texture_file_filter = "Textures (*.bmp *.tga *.png *.jpeg *.jpg *.gif);;";
 
 
-static obs_source_t *selected_audio_source = NULL;
-
-#define FFT_SIZE 1024
-#define NUM_BANDS 64
-static kiss_fft_cpx fft_in[FFT_SIZE];
-static kiss_fft_cpx fft_out[FFT_SIZE];
-static float fft_bands[NUM_BANDS];
-static kiss_fft_cfg fft_cfg = NULL;
-
-// --- Step 1: Property to select an audio source ---
-obs_property_t *add_audio_source_selector(obs_properties_t *props) {
-  obs_property_t *list =
-      obs_properties_add_list(props, "audio_source", "Audio Source", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
-
-  obs_source_t *source = NULL;
-  for (size_t i = 0; i < obs_enum_sources(); i++) {
-    source = obs_enum_sources()[i];
-    const char *name = obs_source_get_name(source);
-    enum obs_source_type type = obs_source_get_type(source);
-    if (type == OBS_SOURCE_TYPE_INPUT || type == OBS_SOURCE_TYPE_FILTER) {
-      obs_property_list_add_string(list, name, name);
-    }
-  }
-
-  return list;
-}
-
-// --- Step 2: Audio callback and registration ---
-
-// Called every time audio data is available from the selected source
-static void on_audio_frame(void *param, struct audio_data *audio) {
-  UNUSED_PARAMETER(param);
-
-  const float *samples = (const float *)audio->data[0];
-  size_t sample_count = audio->frames;
-
-  if (sample_count < FFT_SIZE)
-    return;
-
-  for (size_t i = 0; i < FFT_SIZE; i++) {
-    float multiplier = 0.5f * (1.0f - cosf((2.0f * (float)M_PI * i) / (FFT_SIZE - 1)));
-    fft_in[i].r = samples[i] * multiplier;
-    fft_in[i].i = 0.0f;
-  }
-
-  kiss_fft(fft_cfg, fft_in, fft_out);
-
-  float magnitude[FFT_SIZE / 2];
-  for (size_t i = 0; i < FFT_SIZE / 2; i++) {
-    magnitude[i] = sqrtf(fft_out[i].r * fft_out[i].r + fft_out[i].i * fft_out[i].i);
-  }
-
-  float max_freq = 24000.0f;
-  float log_min = log10f(20.0f);
-  float log_max = log10f(max_freq);
-
-  for (int b = 0; b < NUM_BANDS; b++) {
-    float log_start = log_min + ((float)b / NUM_BANDS) * (log_max - log_min);
-    float log_end = log_min + ((float)(b + 1) / NUM_BANDS) * (log_max - log_min);
-    float start_hz = powf(10.0f, log_start);
-    float end_hz = powf(10.0f, log_end);
-
-    int start_bin = (int)(start_hz / (max_freq / (FFT_SIZE / 2)));
-    int end_bin = (int)(end_hz / (max_freq / (FFT_SIZE / 2)));
-    if (end_bin >= FFT_SIZE / 2)
-      end_bin = FFT_SIZE / 2 - 1;
-
-    float sum = 0.0f;
-    for (int i = start_bin; i <= end_bin; i++) {
-      sum += magnitude[i];
-    }
-    fft_bands[b] = sum / (end_bin - start_bin + 1);
-  }
-
-  // TODO: send fft_bands to shader as uniform array
-}
-
-void register_audio_callback(const char *source_name) {
-  if (selected_audio_source) {
-    obs_source_remove_audio_capture_callback(selected_audio_source, on_audio_frame, NULL);
-    obs_source_release(selected_audio_source);
-    selected_audio_source = NULL;
-  }
-
-  selected_audio_source = obs_get_source_by_name(source_name);
-  if (selected_audio_source) {
-    obs_source_add_audio_capture_callback(selected_audio_source, on_audio_frame, NULL);
-  }
-}
-
-// --- Step 3: Respond to settings update (user changes audio source) ---
-void shader_filter_update(obs_data_t *settings) {
-  if (!fft_cfg)
-    fft_cfg = kiss_fft_alloc(FFT_SIZE, 0, NULL, NULL);
-
-  const char *src_name = obs_data_get_string(settings, "audio_source");
-  if (src_name && *src_name) {
-    register_audio_callback(src_name);
-  }
-}
-
 static obs_properties_t *shader_filter_properties(void *data)
 {
 	struct shader_filter_data *filter = data;
@@ -2249,6 +2215,29 @@ static obs_properties_t *shader_filter_properties(void *data)
 		}
 		obs_data_release(settings);
 	}
+
+	// Add dropdown for selecting FFT audio source
+    obs_property_t *audio_source_list = obs_properties_add_list(props,
+                                                                "fft_audio_source", // Key used in settings
+                                                                "FFT Audio Source", // Label in UI
+                                                                OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+
+    // Enumerate all sources
+    obs_source_t **sources = NULL;
+    size_t count = 0;
+    sources = obs_enum_sources(&count);
+
+    for (size_t i = 0; i < count; i++) {
+        obs_source_t *source = sources[i];
+        uint32_t flags = obs_source_get_output_flags(source);
+        if (flags & OBS_SOURCE_AUDIO) {
+        const char *name = obs_source_get_name(source);
+        obs_property_list_add_string(audio_source_list, name, name);
+        }
+    }
+
+    bfree(sources); // Clean up
+
 
 	obs_properties_add_button(props, "reload_effect", obs_module_text("ShaderFilter.ReloadEffect"),
 				  shader_filter_reload_effect_clicked);
@@ -2769,6 +2758,55 @@ static void shader_filter_tick(void *data, float seconds)
 
 	filter->output_rendered = false;
 	filter->input_rendered = false;
+
+	#define FFT_SIZE 1024
+	#define NUM_BANDS 64
+
+    const char *selected_name = obs_data_get_string(settings, "fft_audio_source");
+    obs_source_t *selected_source = obs_get_source_by_name(selected_name);
+    if (selected_source) {
+        audio_data_t audio;
+        if (obs_source_get_audio_render(selected_source, &audio)) {
+			const float *samples = (const float *)audio.data[0];
+			size_t frames = audio.frames;
+
+			static float sample_buffer[FFT_SIZE];
+			static size_t sample_index = 0;
+
+			for (size_t i = 0; i < frames && sample_index < FFT_SIZE; i++) {
+				sample_buffer[sample_index++] = samples[i];
+			}
+
+			if (sample_index >= FFT_SIZE) {
+				kiss_fftr_cfg cfg = kiss_fftr_alloc(FFT_SIZE, 0, NULL, NULL);
+				kiss_fft_scalar in[FFT_SIZE];
+				kiss_fft_cpx out[FFT_SIZE / 2 + 1];
+
+				// Apply windowing
+				for (int i = 0; i < FFT_SIZE; i++) {
+				float w = 0.54f - 0.46f * cosf((2.0f * M_PI * i) / (FFT_SIZE - 1));
+				in[i] = sample_buffer[i] * w;
+				}
+
+				kiss_fftr(cfg, in, out);
+
+				// Clear FFT bands
+				memset(filter->fft_bands, 0, sizeof(filter->fft_bands));
+
+				// Map magnitudes to 64 bands
+				for (int i = 0; i < FFT_SIZE / 2 + 1; i++) {
+				float mag = sqrtf(out[i].r * out[i].r + out[i].i * out[i].i);
+				int band = (int)((float)i / (FFT_SIZE / 2) * NUM_BANDS);
+				if (band < NUM_BANDS)
+					filter->fft_bands[band] += mag;
+				}
+
+				free(cfg);
+				sample_index = 0;
+			}
+        }
+        obs_source_release(selected_source);
+    }
 }
 
 gs_texrender_t *create_or_reset_texrender(gs_texrender_t *render)
@@ -2950,6 +2988,33 @@ void shader_filter_set_effect_params(struct shader_filter_data *filter)
 	if (filter->param_rand_instance_f != NULL) {
 		gs_effect_set_float(filter->param_rand_instance_f, filter->rand_instance_f);
 	}
+	if (filter->param_bass_strength != NULL) {
+        gs_effect_set_float(filter->param_bass_strength, filter->bass_strength);
+    }
+    if (filter->param_bass_stateful != NULL) {
+        gs_effect_set_float(filter->param_bass_stateful, filter->bass_stateful);
+    }
+    if (filter->param_low_mid_strength != NULL) {
+        gs_effect_set_float(filter->param_low_mid_strength, filter->low_mid_strength);
+    }
+    if (filter->param_low_mid_stateful != NULL) {
+        gs_effect_set_float(filter->param_low_mid_stateful, filter->low_mid_stateful);
+    }
+    if (filter->param_high_mid_strength != NULL) {
+        gs_effect_set_float(filter->param_high_mid_strength, filter->high_mid_strength);
+    }
+    if (filter->param_high_mid_stateful != NULL) {
+        gs_effect_set_float(filter->param_high_mid_stateful, filter->high_mid_stateful);
+    }
+    if (filter->param_treble_strength != NULL) {
+        gs_effect_set_float(filter->param_treble_strength, filter->treble_strength);
+    }
+    if (filter->param_treble_stateful != NULL) {
+        gs_effect_set_float(filter->param_treble_stateful, filter->treble_stateful);
+    }
+    if (filter->param_fft_bands != NULL) {
+        gs_effect_set_val_array(filter->param_fft_bands, filter->fft_bands, 64);
+    }
 
 	size_t param_count = filter->stored_param_list.num;
 	for (size_t param_index = 0; param_index < param_count; param_index++) {

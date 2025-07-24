@@ -2,9 +2,11 @@
 // Version 1.21 by Charles Fettinger https://github.com/Oncorporation/obs-shaderfilter
 // original version by nleseul https://github.com/nleseul/obs-shaderfilter
 #include <obs-module.h>
+#include <obs-audio-controls.h>
 #include <graphics/graphics.h>
 #include <graphics/image-file.h>
 #include <graphics/math-extra.h>
+#include <graphics/effect.h>
 
 #include <util/base.h>
 #include <util/dstr.h>
@@ -188,6 +190,7 @@ struct shader_filter_data {
 	gs_texrender_t *output_texrender;
 	gs_texrender_t *previous_output_texrender;
 	gs_eparam_t *param_output_image;
+	obs_mutex_t audio_mutex;
 
 	bool reload_effect;
 	struct dstr last_path;
@@ -216,6 +219,7 @@ struct shader_filter_data {
     float high_mid_stateful;
     float treble_stateful;
     float fft_bands[64];
+    float pcm_data[1024];
 
 	gs_eparam_t *param_uv_offset;
 	gs_eparam_t *param_uv_scale;
@@ -282,6 +286,21 @@ struct shader_filter_data {
 
 	DARRAY(struct effect_param_data) stored_param_list;
 };
+
+static void audio_capture_callback(void *param, const struct audio_data *audio) {
+  struct shader_filter_data *filter = (struct shader_filter_data *)param;
+
+  // Example: process audio for FFT
+  // Only using one channel here; you can average or mix as needed
+  const float *pcm = (const float *)audio->data[0];
+  size_t samples = (size_t)audio->frames;
+
+  // Copy to buffer for FFT in tick()
+  obs_mutex_lock(&filter->audio_mutex);
+  memcpy(filter->pcm_data, pcm, samples * sizeof(float));
+  obs_mutex_unlock(&filter->audio_mutex);
+}
+
 
 static unsigned int rand_interval(unsigned int min, unsigned int max)
 {
@@ -771,6 +790,7 @@ static void *shader_filter_create(obs_data_t *settings, obs_source_t *source)
 	struct shader_filter_data *filter = bzalloc(sizeof(struct shader_filter_data));
 	filter->context = source;
 	filter->reload_effect = true;
+    obs_mutex_init(&filter->audio_mutex);
 
 	dstr_init(&filter->last_path);
 	dstr_copy(&filter->last_path, obs_data_get_string(settings, "shader_file_name"));
@@ -789,7 +809,7 @@ static void shader_filter_destroy(void *data)
 {
 	struct shader_filter_data *filter = data;
 	shader_filter_clear_params(filter);
-
+    obs_mutex_destroy(&filter->audio_mutex);
 	obs_enter_graphics();
 	if (filter->effect)
 		gs_effect_destroy(filter->effect);
@@ -809,6 +829,7 @@ static void shader_filter_destroy(void *data)
 
 	dstr_free(&filter->last_path);
 	da_free(filter->stored_param_list);
+
 
 	bfree(filter);
 }
@@ -2477,6 +2498,12 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 		obs_source_update_properties(filter->context);
 	}
 
+	const char *selected_name = obs_data_get_string(settings, "fft_audio_source");
+    obs_source_t *selected_source = obs_get_source_by_name(selected_name);
+    if (selected_source) {
+        obs_source_add_audio_capture_callback(selected_source, audio_capture_callback, filter);
+    }
+
 	size_t param_count = filter->stored_param_list.num;
 	for (size_t param_index = 0; param_index < param_count; param_index++) {
 		struct effect_param_data *param = (filter->stored_param_list.array + param_index);
@@ -2753,50 +2780,52 @@ static void shader_filter_tick(void *data, float seconds)
 
 	#define FFT_SIZE 1024
 	#define NUM_BANDS 64
+	
+	obs_data_t *settings = obs_source_get_settings(filter->context);
 
     const char *selected_name = obs_data_get_string(settings, "fft_audio_source");
     obs_source_t *selected_source = obs_get_source_by_name(selected_name);
     if (selected_source) {
-        audio_data_t audio;
-        if (obs_source_get_audio_render(selected_source, &audio)) {
-			const float *samples = (const float *)audio.data[0];
-			size_t frames = audio.frames;
 
-			static float sample_buffer[FFT_SIZE];
-			static size_t sample_index = 0;
+        float samples[FFT_SIZE];
+        obs_mutex_lock(&filter->audio_mutex);
+        memcpy(samples, filter->pcm_data, FFT_SIZE * sizeof(float));
+        obs_mutex_unlock(&filter->audio_mutex);
 
-			for (size_t i = 0; i < frames && sample_index < FFT_SIZE; i++) {
-				sample_buffer[sample_index++] = samples[i];
+		static float sample_buffer[FFT_SIZE];
+		static size_t sample_index = 0;
+
+		for (size_t i = 0; i < frames && sample_index < FFT_SIZE; i++) {
+			sample_buffer[sample_index++] = samples[i];
+		}
+
+		if (sample_index >= FFT_SIZE) {
+			kiss_fftr_cfg cfg = kiss_fftr_alloc(FFT_SIZE, 0, NULL, NULL);
+			kiss_fft_scalar in[FFT_SIZE];
+			kiss_fft_cpx out[FFT_SIZE / 2 + 1];
+
+			// Apply windowing
+			for (int i = 0; i < FFT_SIZE; i++) {
+			float w = 0.54f - 0.46f * cosf((2.0f * M_PI * i) / (FFT_SIZE - 1));
+			in[i] = sample_buffer[i] * w;
 			}
 
-			if (sample_index >= FFT_SIZE) {
-				kiss_fftr_cfg cfg = kiss_fftr_alloc(FFT_SIZE, 0, NULL, NULL);
-				kiss_fft_scalar in[FFT_SIZE];
-				kiss_fft_cpx out[FFT_SIZE / 2 + 1];
+			kiss_fftr(cfg, in, out);
 
-				// Apply windowing
-				for (int i = 0; i < FFT_SIZE; i++) {
-				float w = 0.54f - 0.46f * cosf((2.0f * M_PI * i) / (FFT_SIZE - 1));
-				in[i] = sample_buffer[i] * w;
-				}
+			// Clear FFT bands
+			memset(filter->fft_bands, 0, sizeof(filter->fft_bands));
 
-				kiss_fftr(cfg, in, out);
-
-				// Clear FFT bands
-				memset(filter->fft_bands, 0, sizeof(filter->fft_bands));
-
-				// Map magnitudes to 64 bands
-				for (int i = 0; i < FFT_SIZE / 2 + 1; i++) {
-				float mag = sqrtf(out[i].r * out[i].r + out[i].i * out[i].i);
-				int band = (int)((float)i / (FFT_SIZE / 2) * NUM_BANDS);
-				if (band < NUM_BANDS)
-					filter->fft_bands[band] += mag;
-				}
-
-				free(cfg);
-				sample_index = 0;
+			// Map magnitudes to 64 bands
+			for (int i = 0; i < FFT_SIZE / 2 + 1; i++) {
+			float mag = sqrtf(out[i].r * out[i].r + out[i].i * out[i].i);
+			int band = (int)((float)i / (FFT_SIZE / 2) * NUM_BANDS);
+			if (band < NUM_BANDS)
+				filter->fft_bands[band] += mag;
 			}
-        }
+
+			kiss_fftr_free(cfg);
+			sample_index = 0;
+		}
         obs_source_release(selected_source);
     }
 }

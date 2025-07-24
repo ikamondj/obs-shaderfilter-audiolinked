@@ -2165,6 +2165,15 @@ static bool shader_filter_convert(obs_properties_t *props, obs_property_t *prope
 
 static const char *shader_filter_texture_file_filter = "Textures (*.bmp *.tga *.png *.jpeg *.jpg *.gif);;";
 
+static bool enum_audio_sources_callback(void *param, obs_source_t *src) {
+  if (obs_source_get_output_flags(src) & OBS_SOURCE_AUDIO) {
+    obs_property_t *prop = (obs_property_t *)param;
+    const char *name = obs_source_get_name(src);
+    obs_property_list_add_string(prop, name, name);
+  }
+  return true;
+}
+
 
 static obs_properties_t *shader_filter_properties(void *data)
 {
@@ -2216,27 +2225,10 @@ static obs_properties_t *shader_filter_properties(void *data)
 		obs_data_release(settings);
 	}
 
-	// Add dropdown for selecting FFT audio source
-    obs_property_t *audio_source_list = obs_properties_add_list(props,
-                                                                "fft_audio_source", // Key used in settings
-                                                                "FFT Audio Source", // Label in UI
-                                                                OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	obs_property_t *audio_source_list =
+            obs_properties_add_list(props, "fft_audio_source", "FFT Audio Source", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 
-    // Enumerate all sources
-    obs_source_t **sources = NULL;
-    size_t count = 0;
-    sources = obs_enum_sources(&count);
-
-    for (size_t i = 0; i < count; i++) {
-        obs_source_t *source = sources[i];
-        uint32_t flags = obs_source_get_output_flags(source);
-        if (flags & OBS_SOURCE_AUDIO) {
-        const char *name = obs_source_get_name(source);
-        obs_property_list_add_string(audio_source_list, name, name);
-        }
-    }
-
-    bfree(sources); // Clean up
+        obs_enum_sources(enum_audio_sources_callback, audio_source_list);
 
 
 	obs_properties_add_button(props, "reload_effect", obs_module_text("ShaderFilter.ReloadEffect"),

@@ -6,7 +6,6 @@
 #include <graphics/graphics.h>
 #include <graphics/image-file.h>
 #include <graphics/math-extra.h>
-#include <graphics/effect.h>
 
 #include <util/base.h>
 #include <util/dstr.h>

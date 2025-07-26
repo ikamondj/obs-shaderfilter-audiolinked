@@ -45,6 +45,14 @@ uniform float elapsed_time_start;\n\
 uniform float elapsed_time_show;\n\
 uniform float elapsed_time_active;\n\
 uniform float elapsed_time_enable;\n\
+uniform float bass;\n\
+uniform float lows;\n\
+uniform float mids;\n\
+uniform float treb;\n\
+uniform float bass_c;\n\
+uniform float lows_c;\n\
+uniform float mids_c;\n\
+uniform float treb_c;\n\
 uniform int loops;\n\
 uniform float loop_second;\n\
 uniform float local_time;\n\
@@ -247,6 +255,14 @@ struct shader_filter_data {
 	float rand_f;
 	float rand_instance_f;
 	float rand_activation_f;
+	float bass;
+    float lows;
+    float mids;
+    float treb;
+	float bass_c;
+    float lows_c;
+    float mids_c;
+    float treb_c;
 
 	DARRAY(struct effect_param_data) stored_param_list;
 };

@@ -125,8 +125,8 @@ technique Draw\n\
 	}\n\
 }\n";
 
-static void on_audio_received(void* param, uint64_t ts, struct audio_data* data) {
-
+static void on_audio_received(void *param, unsigned long ts, struct audio_data *data) {
+	
 }
 
 struct effect_param_data {

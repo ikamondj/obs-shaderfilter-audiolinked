@@ -125,7 +125,7 @@ technique Draw\n\
 	}\n\
 }\n";
 
-void on_audio_received(void* param, uint64_t ts, struct audio_data* data) {
+static void on_audio_received(void* param, uint64_t ts, struct audio_data* data) {
 
 }
 
@@ -491,7 +491,7 @@ static void load_sprite_buffer(struct shader_filter_data *filter)
 static void add_callback(size_t mix_idx, const struct audio_convert_info *conversion,
                          void *param) {
   
-	obs_add_raw_audio_callback(mix_idx, conversion, on_audio_received, param);
+	obs_add_raw_audio_callback(mix_idx, conversion, &on_audio_received, param);
 }
 
 static void shader_filter_reload_effect(struct shader_filter_data *filter)

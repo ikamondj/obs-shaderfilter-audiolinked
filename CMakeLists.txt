@@ -19,6 +19,8 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/version.h.in ${CMAKE_CURRENT_SOURCE_D
 
 target_sources(${PROJECT_NAME} PRIVATE
 	obs-shaderfilter.c
+	kiss_fft.c
+	kiss_fftr.c
 	version.h)
 	
 if(BUILD_OUT_OF_TREE)

@@ -24,6 +24,7 @@
 #endif
 
 #include "version.h"
+#include "kiss_fftr.h"
 
 float (*move_get_transition_filter)(obs_source_t *filter_from, obs_source_t **filter_to) = NULL;
 
@@ -123,6 +124,16 @@ technique Draw\n\
 		pixel_shader = mainImage(v_in);\n\
 	}\n\
 }\n";
+
+struct audio_convert_info {
+  enum audio_format format;
+  uint32_t samples_per_sec;
+  uint8_t speakers;
+};
+
+void on_audio_received(void* param, uint64_t ts, struct audio_data* data) {
+
+}
 
 struct effect_param_data {
 	struct dstr name;
@@ -480,6 +491,8 @@ static void load_sprite_buffer(struct shader_filter_data *filter)
 	memset(vbd->tvarray[0].array, 0, sizeof(struct vec2) * 4);
 	filter->sprite_buffer = gs_vertexbuffer_create(vbd, GS_DYNAMIC);
 }
+
+//void obs_add_raw_audio_callback(size_t mix_idx, const struct audio_convert_info *conversion, audio_output_callback_t callback, void *param)
 
 static void shader_filter_reload_effect(struct shader_filter_data *filter)
 {

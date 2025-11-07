@@ -207,7 +207,7 @@ static void kf_bfly_generic(
         KISS_FFT_ERROR("Memory allocation failed.");
         return;
     }
-
+    int istride = (int)fstride;
     for ( u=0; u<m; ++u ) {
         k=u;
         for ( q1=0 ; q1<p ; ++q1 ) {
@@ -221,7 +221,7 @@ static void kf_bfly_generic(
             int twidx=0;
             Fout[ k ] = scratch[0];
             for (q=1;q<p;++q ) {
-                twidx += fstride * k;
+		    twidx += istride * k;
                 if (twidx>=Norig) twidx-=Norig;
                 C_MUL(t,scratch[q] , twiddles[twidx] );
                 C_ADDTO( Fout[ k ] ,t);

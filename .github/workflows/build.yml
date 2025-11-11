@@ -2,7 +2,7 @@ name: build obs plugin
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, injected-params ]
   pull_request:
     branches: [ master ]
 
@@ -22,7 +22,7 @@ jobs:
     env:
       CODESIGN_IDENT: '-'
       CODESIGN_IDENT_INSTALLER: ''
-      MACOSX_DEPLOYMENT_TARGET: '10.15'  
+      MACOSX_DEPLOYMENT_TARGET: '10.15'
     defaults:
       run:
         shell: zsh {0}

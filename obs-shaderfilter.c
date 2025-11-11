@@ -45,33 +45,6 @@ uniform float elapsed_time_start;\n\
 uniform float elapsed_time_show;\n\
 uniform float elapsed_time_active;\n\
 uniform float elapsed_time_enable;\n\
-uniform float bass;\n\
-uniform float lows;\n\
-uniform float mids;\n\
-uniform float treb;\n\
-uniform float bass_c;\n\
-uniform float lows_c;\n\
-uniform float mids_c;\n\
-uniform float treb_c;\n\
-uniform float l_bass;\n\
-uniform float l_lows;\n\
-uniform float l_mids;\n\
-uniform float l_treb;\n\
-uniform float l_bass_c;\n\
-uniform float l_lows_c;\n\
-uniform float l_mids_c;\n\
-uniform float l_treb_c;\n\
-uniform float r_bass;\n\
-uniform float r_lows;\n\
-uniform float r_mids;\n\
-uniform float r_treb;\n\
-uniform float r_bass_c;\n\
-uniform float r_lows_c;\n\
-uniform float r_mids_c;\n\
-uniform float r_treb_c;\n\
-uniform float au[64];\n\
-uniform float lau[64];\n\
-uniform float rau[64];\n\
 uniform int loops;\n\
 uniform float loop_second;\n\
 uniform float local_time;\n\
@@ -252,33 +225,6 @@ struct shader_filter_data {
 	gs_eparam_t *param_transition_time;
 	gs_eparam_t *param_convert_linear;
 	gs_eparam_t *param_previous_output;
-	gs_eparam_t *param_bass;
-	gs_eparam_t *param_lows;
-	gs_eparam_t *param_mids;
-	gs_eparam_t *param_treb;
-	gs_eparam_t *param_bass_c;
-	gs_eparam_t *param_lows_c;
-	gs_eparam_t *param_mids_c;
-	gs_eparam_t *param_treb_c;
-	gs_eparam_t *param_l_bass;
-	gs_eparam_t *param_l_lows;
-	gs_eparam_t *param_l_mids;
-	gs_eparam_t *param_l_treb;
-	gs_eparam_t *param_l_bass_c;
-	gs_eparam_t *param_l_lows_c;
-	gs_eparam_t *param_l_mids_c;
-	gs_eparam_t *param_l_treb_c;
-	gs_eparam_t *param_r_bass;
-	gs_eparam_t *param_r_lows;
-	gs_eparam_t *param_r_mids;
-	gs_eparam_t *param_r_treb;
-	gs_eparam_t *param_r_bass_c;
-	gs_eparam_t *param_r_lows_c;
-	gs_eparam_t *param_r_mids_c;
-	gs_eparam_t *param_r_treb_c;
-	gs_eparam_t *param_au;
-	gs_eparam_t *param_lau;
-	gs_eparam_t *param_rau;
 
 	int expand_left;
 	int expand_right;
@@ -301,34 +247,6 @@ struct shader_filter_data {
 	float rand_f;
 	float rand_instance_f;
 	float rand_activation_f;
-
-	float bass;
-	float lows;
-	float mids;
-	float treb;
-	float bass_c;
-	float lows_c;
-	float mids_c;
-	float treb_c;
-	float l_bass;
-	float l_lows;
-	float l_mids;
-	float l_treb;
-	float l_bass_c;
-	float l_lows_c;
-	float l_mids_c;
-	float l_treb_c;
-	float r_bass;
-	float r_lows;
-	float r_mids;
-	float r_treb;
-	float r_bass_c;
-	float r_lows_c;
-	float r_mids_c;
-	float r_treb_c;
-	float au[64];
-	float lau[64];
-	float rau[64];
 
 	DARRAY(struct effect_param_data) stored_param_list;
 };
@@ -440,34 +358,6 @@ static void shader_filter_clear_params(struct shader_filter_data *filter)
 	filter->param_transition_time = NULL;
 	filter->param_convert_linear = NULL;
 	filter->param_previous_output = NULL;
-	filter->param_bass = NULL;
-	filter->param_lows = NULL;
-	filter->param_mids = NULL;
-	filter->param_treb = NULL;
-	filter->param_bass_c = NULL;
-	filter->param_lows_c = NULL;
-	filter->param_mids_c = NULL;
-	filter->param_treb_c = NULL;
-	filter->param_l_bass = NULL;
-	filter->param_l_lows = NULL;
-	filter->param_l_mids = NULL;
-	filter->param_l_treb = NULL;
-	filter->param_l_bass_c = NULL;
-	filter->param_l_lows_c = NULL;
-	filter->param_l_mids_c = NULL;
-	filter->param_l_treb_c = NULL;
-	filter->param_r_bass = NULL;
-	filter->param_r_lows = NULL;
-	filter->param_r_mids = NULL;
-	filter->param_r_treb = NULL;
-	filter->param_r_bass_c = NULL;
-	filter->param_r_lows_c = NULL;
-	filter->param_r_mids_c = NULL;
-	filter->param_r_treb_c = NULL;
-	filter->param_au = NULL;
-	filter->param_lau = NULL;
-	filter->param_rau = NULL;
-
 
 	size_t param_count = filter->stored_param_list.num;
 	for (size_t param_index = 0; param_index < param_count; param_index++) {
@@ -730,38 +620,7 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 			filter->param_previous_image = param;
 		} else if (strcmp(info.name, "previous_output") == 0) {
 			filter->param_previous_output = param;
-		} else if (strcmp(info.name, "au") == 0) {
-			filter->param_au = param;
-		} else if (strcmp(info.name, "lau") == 0) {
-			filter->param_lau = param;
-		} else if (strcmp(info.name, "rau") == 0) {
-			filter->param_rau = param;
-		}
-		else if (strcmp(info.name, "bass") 	== 0) 	{filter->param_bass	= param;}
-		else if (strcmp(info.name, "lows") 	== 0) 	{filter->param_lows	= param;}
-		else if (strcmp(info.name, "mids") 	== 0) 	{filter->param_mids	= param;}
-		else if (strcmp(info.name, "treb") 	== 0) 	{filter->param_treb	= param;}
-		else if (strcmp(info.name, "bass_c") 	== 0) 	{filter->param_bass_c 	= param;}
-		else if (strcmp(info.name, "lows_c") 	== 0) 	{filter->param_lows_c 	= param;}
-		else if (strcmp(info.name, "mids_c") 	== 0) 	{filter->param_mids_c 	= param;}
-		else if (strcmp(info.name, "treb_c") 	== 0) 	{filter->param_treb_c 	= param;}
-		else if (strcmp(info.name, "l_bass") 	== 0) 	{filter->param_l_bass 	= param;}
-		else if (strcmp(info.name, "l_lows") 	== 0) 	{filter->param_l_lows 	= param;}
-		else if (strcmp(info.name, "l_mids") 	== 0) 	{filter->param_l_mids 	= param;}
-		else if (strcmp(info.name, "l_treb") 	== 0) 	{filter->param_l_treb 	= param;}
-		else if (strcmp(info.name, "l_bass_c")	== 0) 	{filter->param_l_bass_c = param;}
-		else if (strcmp(info.name, "l_lows_c")	== 0) 	{filter->param_l_lows_c = param;}
-		else if (strcmp(info.name, "l_mids_c")	== 0) 	{filter->param_l_mids_c = param;}
-		else if (strcmp(info.name, "l_treb_c")	== 0) 	{filter->param_l_treb_c = param;}
-		else if (strcmp(info.name, "r_bass") 	== 0) 	{filter->param_r_bass 	= param;}
-		else if (strcmp(info.name, "r_lows") 	== 0) 	{filter->param_r_lows 	= param;}
-		else if (strcmp(info.name, "r_mids") 	== 0) 	{filter->param_r_mids 	= param;}
-		else if (strcmp(info.name, "r_treb") 	== 0) 	{filter->param_r_treb 	= param;}
-		else if (strcmp(info.name, "r_bass_c")	== 0) 	{filter->param_r_bass_c = param;}
-		else if (strcmp(info.name, "r_lows_c")	== 0) 	{filter->param_r_lows_c = param;}
-		else if (strcmp(info.name, "r_mids_c")	== 0) 	{filter->param_r_mids_c = param;}
-		else if (strcmp(info.name, "r_treb_c")	== 0) 	{filter->param_r_treb_c = param;}
-		else if (filter->transition && strcmp(info.name, "image_a") == 0) {
+		} else if (filter->transition && strcmp(info.name, "image_a") == 0) {
 			filter->param_image_a = param;
 		} else if (filter->transition && strcmp(info.name, "image_b") == 0) {
 			filter->param_image_b = param;
@@ -2988,44 +2847,6 @@ void shader_filter_set_effect_params(struct shader_filter_data *filter)
 	if (filter->param_rand_instance_f != NULL) {
 		gs_effect_set_float(filter->param_rand_instance_f, filter->rand_instance_f);
 	}
-	if (filter->param_au)  {
-		gs_effect_set_val(filter->param_au,  filter->au,  sizeof(filter->au));
-	}
-	if (filter->param_lau) {
-		gs_effect_set_val(filter->param_lau, filter->lau, sizeof(filter->lau));
-	}
-	if (filter->param_rau) {
-		gs_effect_set_val(filter->param_rau, filter->rau, sizeof(filter->rau));
-	}
-	if (filter->param_bass)      {gs_effect_set_float(filter->param_bass,      filter->bass);}
-	if (filter->param_lows)      {gs_effect_set_float(filter->param_lows,      filter->lows);}
-	if (filter->param_mids)      {gs_effect_set_float(filter->param_mids,      filter->mids);}
-	if (filter->param_treb)      {gs_effect_set_float(filter->param_treb,      filter->treb);}
-
-	if (filter->param_bass_c)    {gs_effect_set_float(filter->param_bass_c,    filter->bass_c);}
-	if (filter->param_lows_c)    {gs_effect_set_float(filter->param_lows_c,    filter->lows_c);}
-	if (filter->param_mids_c)    {gs_effect_set_float(filter->param_mids_c,    filter->mids_c);}
-	if (filter->param_treb_c)    {gs_effect_set_float(filter->param_treb_c,    filter->treb_c);}
-
-	if (filter->param_l_bass)    {gs_effect_set_float(filter->param_l_bass,    filter->l_bass);}
-	if (filter->param_l_lows)    {gs_effect_set_float(filter->param_l_lows,    filter->l_lows);}
-	if (filter->param_l_mids)    {gs_effect_set_float(filter->param_l_mids,    filter->l_mids);}
-	if (filter->param_l_treb)    {gs_effect_set_float(filter->param_l_treb,    filter->l_treb);}
-
-	if (filter->param_l_bass_c)  {gs_effect_set_float(filter->param_l_bass_c,  filter->l_bass_c);}
-	if (filter->param_l_lows_c)  {gs_effect_set_float(filter->param_l_lows_c,  filter->l_lows_c);}
-	if (filter->param_l_mids_c)  {gs_effect_set_float(filter->param_l_mids_c,  filter->l_mids_c);}
-	if (filter->param_l_treb_c)  {gs_effect_set_float(filter->param_l_treb_c,  filter->l_treb_c);}
-
-	if (filter->param_r_bass)    {gs_effect_set_float(filter->param_r_bass,    filter->r_bass);}
-	if (filter->param_r_lows)    {gs_effect_set_float(filter->param_r_lows,    filter->r_lows);}
-	if (filter->param_r_mids)    {gs_effect_set_float(filter->param_r_mids,    filter->r_mids);}
-	if (filter->param_r_treb)    {gs_effect_set_float(filter->param_r_treb,    filter->r_treb);}
-
-	if (filter->param_r_bass_c)  {gs_effect_set_float(filter->param_r_bass_c,  filter->r_bass_c);}
-	if (filter->param_r_lows_c)  {gs_effect_set_float(filter->param_r_lows_c,  filter->r_lows_c);}
-	if (filter->param_r_mids_c)  {gs_effect_set_float(filter->param_r_mids_c,  filter->r_mids_c);}
-	if (filter->param_r_treb_c)  {gs_effect_set_float(filter->param_r_treb_c,  filter->r_treb_c);}
 
 	size_t param_count = filter->stored_param_list.num;
 	for (size_t param_index = 0; param_index < param_count; param_index++) {

@@ -575,22 +575,6 @@ static void load_sprite_buffer(struct shader_filter_data *filter)
 	filter->sprite_buffer = gs_vertexbuffer_create(vbd, GS_DYNAMIC);
 }
 
-#define REGISTER_FLOAT_UNIFORM(field_name) do { \
-    filter->param_##field_name = param; \
-    struct effect_param_data *pd = da_push_back_new(filter->stored_param_list); \
-    dstr_copy(&pd->name, #field_name); \
-    pd->type = GS_SHADER_PARAM_FLOAT; \
-    pd->param = param; \
-} while(0)
-
-#define REGISTER_ARRAY_UNIFORM(field_name) do { \
-    filter->param_##field_name = param; \
-    struct effect_param_data *pd = da_push_back_new(filter->stored_param_list); \
-    dstr_copy(&pd->name, #field_name); \
-    pd->type = GS_SHADER_PARAM_UNKNOWN; /* array type doesn't go through UI system anyway */ \
-    pd->param = param; \
-} while(0)
-
 static void shader_filter_reload_effect(struct shader_filter_data *filter)
 {
 	obs_data_t *settings = obs_source_get_settings(filter->context);
@@ -746,62 +730,37 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 			filter->param_previous_image = param;
 		} else if (strcmp(info.name, "previous_output") == 0) {
 			filter->param_previous_output = param;
-		}
-		if (strcmp(info.name, "au") == 0) {
-			REGISTER_ARRAY_UNIFORM(au);
+		} else if (strcmp(info.name, "au") == 0) {
+			filter->param_au = param;
 		} else if (strcmp(info.name, "lau") == 0) {
-			REGISTER_ARRAY_UNIFORM(lau);
+			filter->param_lau = param;
 		} else if (strcmp(info.name, "rau") == 0) {
-			REGISTER_ARRAY_UNIFORM(rau);
-		} else if (strcmp(info.name, "bass") == 0) {
-			REGISTER_FLOAT_UNIFORM(bass);
-		} else if (strcmp(info.name, "lows") == 0) {
-			REGISTER_FLOAT_UNIFORM(lows);
-		} else if (strcmp(info.name, "mids") == 0) {
-			REGISTER_FLOAT_UNIFORM(mids);
-		} else if (strcmp(info.name, "treb") == 0) {
-			REGISTER_FLOAT_UNIFORM(treb);
-		} else if (strcmp(info.name, "bass_c") == 0) {
-			REGISTER_FLOAT_UNIFORM(bass_c);
-		} else if (strcmp(info.name, "lows_c") == 0) {
-			REGISTER_FLOAT_UNIFORM(lows_c);
-		} else if (strcmp(info.name, "mids_c") == 0) {
-			REGISTER_FLOAT_UNIFORM(mids_c);
-		} else if (strcmp(info.name, "treb_c") == 0) {
-			REGISTER_FLOAT_UNIFORM(treb_c);
-		} else if (strcmp(info.name, "l_bass") == 0) {
-			REGISTER_FLOAT_UNIFORM(l_bass);
-		} else if (strcmp(info.name, "l_lows") == 0) {
-			REGISTER_FLOAT_UNIFORM(l_lows);
-		} else if (strcmp(info.name, "l_mids") == 0) {
-			REGISTER_FLOAT_UNIFORM(l_mids);
-		} else if (strcmp(info.name, "l_treb") == 0) {
-			REGISTER_FLOAT_UNIFORM(l_treb);
-		} else if (strcmp(info.name, "l_bass_c") == 0) {
-			REGISTER_FLOAT_UNIFORM(l_bass_c);
-		} else if (strcmp(info.name, "l_lows_c") == 0) {
-			REGISTER_FLOAT_UNIFORM(l_lows_c);
-		} else if (strcmp(info.name, "l_mids_c") == 0) {
-			REGISTER_FLOAT_UNIFORM(l_mids_c);
-		} else if (strcmp(info.name, "l_treb_c") == 0) {
-			REGISTER_FLOAT_UNIFORM(l_treb_c);
-		} else if (strcmp(info.name, "r_bass") == 0) {
-			REGISTER_FLOAT_UNIFORM(r_bass);
-		} else if (strcmp(info.name, "r_lows") == 0) {
-			REGISTER_FLOAT_UNIFORM(r_lows);
-		} else if (strcmp(info.name, "r_mids") == 0) {
-			REGISTER_FLOAT_UNIFORM(r_mids);
-		} else if (strcmp(info.name, "r_treb") == 0) {
-			REGISTER_FLOAT_UNIFORM(r_treb);
-		} else if (strcmp(info.name, "r_bass_c") == 0) {
-			REGISTER_FLOAT_UNIFORM(r_bass_c);
-		} else if (strcmp(info.name, "r_lows_c") == 0) {
-			REGISTER_FLOAT_UNIFORM(r_lows_c);
-		} else if (strcmp(info.name, "r_mids_c") == 0) {
-			REGISTER_FLOAT_UNIFORM(r_mids_c);
-		} else if (strcmp(info.name, "r_treb_c") == 0) {
-			REGISTER_FLOAT_UNIFORM(r_treb_c);
+			filter->param_rau = param;
 		}
+		else if (strcmp(info.name, "bass") 	== 0) 	{filter->param_bass	= param;}
+		else if (strcmp(info.name, "lows") 	== 0) 	{filter->param_lows	= param;}
+		else if (strcmp(info.name, "mids") 	== 0) 	{filter->param_mids	= param;}
+		else if (strcmp(info.name, "treb") 	== 0) 	{filter->param_treb	= param;}
+		else if (strcmp(info.name, "bass_c") 	== 0) 	{filter->param_bass_c 	= param;}
+		else if (strcmp(info.name, "lows_c") 	== 0) 	{filter->param_lows_c 	= param;}
+		else if (strcmp(info.name, "mids_c") 	== 0) 	{filter->param_mids_c 	= param;}
+		else if (strcmp(info.name, "treb_c") 	== 0) 	{filter->param_treb_c 	= param;}
+		else if (strcmp(info.name, "l_bass") 	== 0) 	{filter->param_l_bass 	= param;}
+		else if (strcmp(info.name, "l_lows") 	== 0) 	{filter->param_l_lows 	= param;}
+		else if (strcmp(info.name, "l_mids") 	== 0) 	{filter->param_l_mids 	= param;}
+		else if (strcmp(info.name, "l_treb") 	== 0) 	{filter->param_l_treb 	= param;}
+		else if (strcmp(info.name, "l_bass_c")	== 0) 	{filter->param_l_bass_c = param;}
+		else if (strcmp(info.name, "l_lows_c")	== 0) 	{filter->param_l_lows_c = param;}
+		else if (strcmp(info.name, "l_mids_c")	== 0) 	{filter->param_l_mids_c = param;}
+		else if (strcmp(info.name, "l_treb_c")	== 0) 	{filter->param_l_treb_c = param;}
+		else if (strcmp(info.name, "r_bass") 	== 0) 	{filter->param_r_bass 	= param;}
+		else if (strcmp(info.name, "r_lows") 	== 0) 	{filter->param_r_lows 	= param;}
+		else if (strcmp(info.name, "r_mids") 	== 0) 	{filter->param_r_mids 	= param;}
+		else if (strcmp(info.name, "r_treb") 	== 0) 	{filter->param_r_treb 	= param;}
+		else if (strcmp(info.name, "r_bass_c")	== 0) 	{filter->param_r_bass_c = param;}
+		else if (strcmp(info.name, "r_lows_c")	== 0) 	{filter->param_r_lows_c = param;}
+		else if (strcmp(info.name, "r_mids_c")	== 0) 	{filter->param_r_mids_c = param;}
+		else if (strcmp(info.name, "r_treb_c")	== 0) 	{filter->param_r_treb_c = param;}
 		else if (filter->transition && strcmp(info.name, "image_a") == 0) {
 			filter->param_image_a = param;
 		} else if (filter->transition && strcmp(info.name, "image_b") == 0) {

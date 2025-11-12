@@ -2326,6 +2326,21 @@ static bool shader_filter_convert(obs_properties_t *props, obs_property_t *prope
 
 static const char *shader_filter_texture_file_filter = "Textures (*.bmp *.tga *.png *.jpeg *.jpg *.gif);;";
 
+static bool is_hidden_uniform(const char *name) {
+    // Combined
+    if (!strcmp(name, "bass") || !strcmp(name, "lows") || !strcmp(name, "mids") || !strcmp(name, "treb") ||
+        !strcmp(name, "bass_c") || !strcmp(name, "lows_c") || !strcmp(name, "mids_c") || !strcmp(name, "treb_c") ||
+        // Left
+        !strcmp(name, "l_bass") || !strcmp(name, "l_lows") || !strcmp(name, "l_mids") || !strcmp(name, "l_treb") ||
+        !strcmp(name, "l_bass_c") || !strcmp(name, "l_lows_c") || !strcmp(name, "l_mids_c") || !strcmp(name, "l_treb_c") ||
+        // Right
+        !strcmp(name, "r_bass") || !strcmp(name, "r_lows") || !strcmp(name, "r_mids") || !strcmp(name, "r_treb") ||
+        !strcmp(name, "r_bass_c") || !strcmp(name, "r_lows_c") || !strcmp(name, "r_mids_c") || !strcmp(name, "r_treb_c")) {
+        return true;
+    }
+    return false;
+}
+
 static obs_properties_t *shader_filter_properties(void *data)
 {
 	struct shader_filter_data *filter = data;
@@ -2392,6 +2407,10 @@ static obs_properties_t *shader_filter_properties(void *data)
 		const char *group_name = param->group.array;
 		const int *options = param->option_values.array;
 		const struct dstr *option_labels = param->option_labels.array;
+
+		if (is_hidden_uniform(param_name)) {
+			continue;
+		}
 
 		struct dstr display_name = {0};
 		struct dstr sources_name = {0};

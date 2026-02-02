@@ -7,6 +7,11 @@ else()
 endif()
 
 project(obs-shaderfilter VERSION 2.5.1)
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTOUIC ON)
+set(CMAKE_AUTORCC ON)
+find_package(Qt6 QUIET COMPONENTS Widgets)
+
 set(PROJECT_FULL_NAME "OBS Shaderfilter")
 
 # Set new UUIDs when you start to create a new plugin.
@@ -63,6 +68,20 @@ endif()
 
 target_link_libraries(${PROJECT_NAME}
 		OBS::libobs)
+
+if(TARGET Qt6::Widgets)
+    target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Widgets)
+endif()
+
+if(TARGET obs-frontend-api)
+    target_link_libraries(${PROJECT_NAME} PRIVATE obs-frontend-api)
+endif()
+
+if(NOT BUILD_OUT_OF_TREE)
+    target_include_directories(${PROJECT_NAME} PRIVATE
+        ${CMAKE_SOURCE_DIR}/UI/obs-frontend-api
+    )
+endif()
 
 if(BUILD_OUT_OF_TREE)
     if(NOT LIB_OUT_DIR)

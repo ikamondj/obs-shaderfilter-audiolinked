@@ -216,11 +216,11 @@ jobs:
       - name: 'Install prerequisite: QT'
         run: |
           curl -kLO https://github.com/obsproject/obs-deps/releases/download/${{ env.WINDOWS_DEPS_VERSION }}/windows-deps-qt6-${{ env.WINDOWS_DEPS_VERSION }}-${{ matrix.target }}.zip -f --retry 5 -C -
-          7z x windows-deps-qt6-${{ env.WINDOWS_DEPS_VERSION }}-${{ matrix.target }}.zip -o"${{ github.workspace }}/cmbuild/deps"
+          7z x windows-deps-qt6-${{ env.WINDOWS_DEPS_VERSION }}-${{ matrix.target }}.zip -o"${{ github.workspace }}/cmbuild/deps -y"
       - name: 'Install prerequisite: Pre-built dependencies'
         run: |
           curl -kLO https://github.com/obsproject/obs-deps/releases/download/${{ env.WINDOWS_DEPS_VERSION }}/windows-deps-${{ env.WINDOWS_DEPS_VERSION }}-${{ matrix.target }}.zip -f --retry 5 -C -
-          7z x windows-deps-${{ env.WINDOWS_DEPS_VERSION }}-${{ matrix.target }}.zip -o"${{ github.workspace }}/cmbuild/deps"
+          7z x windows-deps-${{ env.WINDOWS_DEPS_VERSION }}-${{ matrix.target }}.zip -o"${{ github.workspace }}/cmbuild/deps -y"
       - name: Configure
         run: |
           mkdir ./package

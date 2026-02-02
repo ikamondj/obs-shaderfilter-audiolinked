@@ -24,6 +24,7 @@
 #endif
 
 #include "version.h"
+#include "audiolink/AudioLinkCore.h"
 
 float (*move_get_transition_filter)(obs_source_t *filter_from, obs_source_t **filter_to) = NULL;
 
@@ -3651,11 +3652,14 @@ bool obs_module_load(void)
 	blog(LOG_INFO, "[obs-shaderfilter] loaded version %s", PROJECT_VERSION);
 	obs_register_source(&shader_filter);
 	obs_register_source(&shader_transition);
+	audio_link_obs_module_load();
 
 	return true;
 }
 
-void obs_module_unload(void) {}
+void obs_module_unload(void) {
+	audio_link_obs_module_unload();
+}
 
 void obs_module_post_load()
 {
@@ -3669,4 +3673,5 @@ void obs_module_post_load()
 		move_get_transition_filter = calldata_ptr(&cd, "callback");
 	}
 	calldata_free(&cd);
+
 }

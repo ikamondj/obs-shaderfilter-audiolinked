@@ -18,9 +18,22 @@ add_library(${PROJECT_NAME} MODULE)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/version.h.in ${CMAKE_CURRENT_SOURCE_DIR}/version.h)
 
 target_sources(${PROJECT_NAME} PRIVATE
-	obs-shaderfilter.c
-	version.h)
-	
+    obs-shaderfilter.c
+    version.h
+
+    # --- audiolink core ---
+    audiolink/AudioLinkCore.cpp
+    audiolink/AudioTapManager.cpp
+    audiolink/ShaderDispatcher.cpp
+    audiolink/Dock.cpp
+
+    # --- kissfft (C sources) ---
+    audiolink/kissfft/kiss_fft.c
+    audiolink/kissfft/kiss_fftr.c
+)
+
+target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_17)
+
 if(BUILD_OUT_OF_TREE)
   find_package(libobs REQUIRED)
   include(cmake/ObsPluginHelpers.cmake)
@@ -38,7 +51,7 @@ if(OS_WINDOWS)
 		)
 	configure_file(${CMAKE_CURRENT_SOURCE_DIR}/resource.rc.in ${CMAKE_CURRENT_SOURCE_DIR}/${PROJECT_NAME}.rc)
 	target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/${PROJECT_NAME}.rc)
-	
+
 elseif(OS_MACOS)
 	set(MACOS_BUNDLEID "com.exeldro.${PROJECT_NAME}")
 	set(MACOSX_PLUGIN_GUI_IDENTIFIER "${MACOS_BUNDLEID}")

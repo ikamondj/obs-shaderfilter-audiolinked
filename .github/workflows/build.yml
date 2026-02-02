@@ -194,7 +194,7 @@ jobs:
       QT_VERSION: '6.3.1'
       CMAKE_GENERATOR: "Visual Studio 17 2022"
       CMAKE_SYSTEM_VERSION: "10.0.18363.657"
-      WINDOWS_DEPS_VERSION: '2022-08-02'
+      WINDOWS_DEPS_VERSION: '2023-11-03'
     steps:
       - name: Add msbuild to PATH
         uses: microsoft/setup-msbuild@v2

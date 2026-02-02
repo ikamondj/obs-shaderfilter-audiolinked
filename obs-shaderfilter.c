@@ -2341,6 +2341,21 @@ static bool is_hidden_uniform(const char *name) {
     return false;
 }
 
+static bool is_hidden_label(const char *name) {
+    // Combined
+    if (!strcmp(name, "Bass") || !strcmp(name, "Lows") || !strcmp(name, "Mids") || !strcmp(name, "Treble") ||
+        !strcmp(name, "Bass (Cumulative)") || !strcmp(name, "Lows (Cumulative)") || !strcmp(name, "Mids (Cumulative)") || !strcmp(name, "Treble (Cumulative)") ||
+        // Left
+        !strcmp(name, "L Bass") || !strcmp(name, "L Lows") || !strcmp(name, "L Mids") || !strcmp(name, "L Treble") ||
+        !strcmp(name, "L Bass (Cumulative)") || !strcmp(name, "L Lows (Cumulative)") || !strcmp(name, "L Mids (Cumulative)") || !strcmp(name, "L Treble (Cumulative)") ||
+        // Right
+        !strcmp(name, "R Bass") || !strcmp(name, "R Lows") || !strcmp(name, "R Mids") || !strcmp(name, "R Treble") ||
+        !strcmp(name, "R Bass (Cumulative)") || !strcmp(name, "R Lows (Cumulative)") || !strcmp(name, "R Mids (Cumulative)") || !strcmp(name, "R Treble (Cumulative)")) {
+        return true;
+    }
+    return false;
+}
+
 static obs_properties_t *shader_filter_properties(void *data)
 {
 	struct shader_filter_data *filter = data;
@@ -2409,6 +2424,10 @@ static obs_properties_t *shader_filter_properties(void *data)
 		const struct dstr *option_labels = param->option_labels.array;
 
 		if (is_hidden_uniform(param_name)) {
+			continue;
+		}
+
+		if (is_hidden_label(label)) {
 			continue;
 		}
 

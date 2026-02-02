@@ -31,7 +31,7 @@ static inline bool is_shader_filter(const obs_source_t* filter)
 
 void init_hann() {
     for (int i = 0; i < FFT_SIZE; i++) {
-        ShaderDispatcher::hann[i] = 0.5f * (1.0f - cosf(2.0f * M_PI * i / (FFT_SIZE - 1)));
+        hann[i] = 0.5f * (1.0f - cosf(2.0f * M_PI * i / (FFT_SIZE - 1)));
     }
 }
 

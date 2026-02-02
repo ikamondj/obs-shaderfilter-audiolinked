@@ -21,7 +21,7 @@ const char* on_obs_module_description(void)
     return "Provides a dockable tool that enumerates audio sources.";
 }
 
-bool audio_link_obs_module_load(void)
+extern "C" bool audio_link_obs_module_load(void)
 {
     g_dock = new AudioLinkDock();
     g_dock->setObjectName("audiolink_dock");
@@ -46,7 +46,7 @@ bool audio_link_obs_module_load(void)
     return true;
 }
 
-void audio_link_obs_module_unload(void)
+extern "C" void audio_link_obs_module_unload(void)
 {
     // Deleted automatically on OBS shutdown, but safe to clean up
     if (g_toolsAction) {

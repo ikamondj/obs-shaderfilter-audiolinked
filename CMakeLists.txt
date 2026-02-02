@@ -67,15 +67,10 @@ elseif(OS_MACOS)
 endif()
 
 target_link_libraries(${PROJECT_NAME}
-		OBS::libobs)
-
-if(TARGET Qt6::Widgets)
-    target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Widgets)
-endif()
-
-if(TARGET obs-frontend-api)
-    target_link_libraries(${PROJECT_NAME} PRIVATE obs-frontend-api)
-endif()
+  PRIVATE
+		OBS::libobs
+    obs-frontend-api
+    Qt6::Widgets)
 
 if(NOT BUILD_OUT_OF_TREE)
     target_include_directories(${PROJECT_NAME} PRIVATE

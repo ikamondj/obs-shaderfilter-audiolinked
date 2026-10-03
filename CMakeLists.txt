@@ -19,6 +19,12 @@ set(MACOS_INSTALLER_UUID "D1247630-89C0-498A-8A3B-B0752080DEC2")
 
 add_library(${PROJECT_NAME} MODULE)
 
+if(BUILD_OUT_OF_TREE)
+  find_package(libobs REQUIRED)
+  find_package(obs-frontend-api REQUIRED)
+  include(cmake/ObsPluginHelpers.cmake)
+endif()
+
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
 # SIMD real FFT, provided by the adjacent vcpkg manifest. Keep its static
 # implementation private to the plugin (no additional runtime DLL).
@@ -91,12 +97,6 @@ target_sources(${PROJECT_NAME} PRIVATE
 	"${CMAKE_CURRENT_BINARY_DIR}/shader-helpers.generated.h"
 	version.h)
 
-if(BUILD_OUT_OF_TREE)
-  find_package(libobs REQUIRED)
-  find_package(obs-frontend-api REQUIRED)
-  include(cmake/ObsPluginHelpers.cmake)
-endif()
-
 if(OS_WINDOWS)
 	get_filename_component(ISS_FILES_DIR "${CMAKE_BINARY_DIR}\\..\\package" ABSOLUTE)
 	file(TO_NATIVE_PATH "${ISS_FILES_DIR}" ISS_FILES_DIR)
@@ -110,7 +110,7 @@ if(OS_WINDOWS)
 	configure_file(${CMAKE_CURRENT_SOURCE_DIR}/resource.rc.in ${CMAKE_CURRENT_SOURCE_DIR}/${PROJECT_NAME}.rc)
 	target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/${PROJECT_NAME}.rc)
 
-elseif(OS_MACOS)
+elseif(OS_MACOS AND BUILD_OUT_OF_TREE)
 	set(MACOS_BUNDLEID "com.exeldro.${PROJECT_NAME}")
 	set(MACOSX_PLUGIN_GUI_IDENTIFIER "${MACOS_BUNDLEID}")
 	set(MACOSX_PLUGIN_BUNDLE_VERSION "${PROJECT_VERSION}")
@@ -160,6 +160,15 @@ if(SHADERFILTER_BUILD_TESTS)
   target_link_libraries(shaderfilter-tools-test PRIVATE Qt6::Widgets OBS::libobs)
   add_test(NAME shaderfilter-tools COMMAND shaderfilter-tools-test)
   set_tests_properties(shaderfilter-spectrum shaderfilter-audio-energy shaderfilter-gamepad-state shaderfilter-gamepad-api shaderfilter-tools PROPERTIES TIMEOUT 30)
+endif()
+
+# Record the actual generator/configuration-specific output for CI packaging.
+if(APPLE)
+  file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/artifact-$<CONFIG>.json"
+    CONTENT "{\"binary\":\"$<TARGET_FILE:${PROJECT_NAME}>\",\"bundle\":\"$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>\"}\n")
+else()
+  file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/artifact-$<CONFIG>.json"
+    CONTENT "{\"binary\":\"$<TARGET_FILE:${PROJECT_NAME}>\"}\n")
 endif()
 
 if(BUILD_OUT_OF_TREE)

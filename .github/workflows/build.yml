@@ -2,303 +2,174 @@ name: build obs plugin
 
 on:
   push:
-    branches: [ master ]
+    branches: [master, main]
   pull_request:
-    branches: [ master ]
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   PLUGIN_NAME: obs-shaderfilter
-  OBS_VERSION: 28.0.0-rc1
+  OBS_VERSION: '31.1.2'
+  VCPKG_VERSION: e03dc9b29710050cd1018bc5674688108658d327
+
 jobs:
-  macos:
-    name: macOS
-    runs-on: macos-latest
+  build:
+    name: ${{ matrix.platform }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64, arm64, universal]
-    outputs:
-      commitHash: ${{ steps.setup.outputs.commitHash }}
-    env:
-      CODESIGN_IDENT: '-'
-      CODESIGN_IDENT_INSTALLER: ''
-      MACOSX_DEPLOYMENT_TARGET: '10.15'  
+        include:
+          - platform: windows
+            runner: windows-2022
+            arch: x64
+            preset: windows-x64
+            triplet: x64-windows-static-md
+          - platform: linux
+            runner: ubuntu-24.04
+            arch: x86_64
+            preset: ubuntu
+            triplet: x64-linux
+          - platform: macos
+            runner: macos-15
+            arch: arm64
+            preset: macos
+            triplet: arm64-osx
+          - platform: macos
+            runner: macos-15
+            arch: x86_64
+            preset: macos
+            triplet: x64-osx
     defaults:
       run:
-        shell: zsh {0}
+        shell: bash
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4.1.1
+      - name: Checkout OBS
+        uses: actions/checkout@v7.0.1
         with:
-          path: plugin
+          repository: obsproject/obs-studio
+          ref: ${{ env.OBS_VERSION }}
           submodules: recursive
-
-      - name: Checkout obs-studio
-        uses: actions/checkout@v4.1.1
-        with:
-          repository: 'obsproject/obs-studio'
-          path: obs-studio
           fetch-depth: 0
-          submodules: recursive
-
-      - name: Setup Environment
-        id: setup
-        working-directory: ${{ github.workspace }}/plugin
-        run: |
-          ## SETUP ENVIRONMENT SCRIPT
-          print '::group::Clean Homebrew Environment'
-          typeset -a to_remove=()
-
-          for formula (speexdsp curl php) {
-            if [[ -d ${HOMEBREW_PREFIX}/opt/${formula} ]] to_remove+=(${formula})
-          }
-
-          if (( #to_remove > 0 )) brew uninstall --ignore-dependencies ${to_remove}
-          print '::endgroup::'
-
-          print '::group::Set up code signing'
-          if [[ '${{ secrets.MACOS_SIGNING_APPLICATION_IDENTITY }}' != '' && \
-                '${{ secrets.MACOS_SIGNING_INSTALLER_IDENTITY }}' != '' && \
-                '${{ secrets.MACOS_SIGNING_CERT }}' != '' ]] {
-            print 'haveCodesignIdent=true' >> $GITHUB_OUTPUT
-          } else {
-            print 'haveCodesignIdent=false' >> $GITHUB_OUTPUT
-          }
-
-          if [[ '${{ secrets.MACOS_NOTARIZATION_USERNAME }}' != '' && \
-                '${{ secrets.MACOS_NOTARIZATION_PASSWORD }}' != '' ]] {
-            print 'haveNotarizationUser=true' >> $GITHUB_OUTPUT
-          } else {
-            print 'haveNotarizationUser=false' >> $GITHUB_OUTPUT
-          }
-          print '::endgroup::'
-
-          print "ccacheDate=$(date +"%Y-%m-%d")" >> $GITHUB_OUTPUT
-          print "commitHash=${"$(git rev-parse HEAD)"[0,9]}" >> $GITHUB_OUTPUT
-
-      - name: Check for GitHub Labels
-        id: seekingTesters
-        if: ${{ github.event_name == 'pull_request' }}
-        run: |
-          if [[ -n "$(curl -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -s "${{ github.event.pull_request.url }}" | jq -e '.labels[] | select(.name == "Seeking Testers")')" ]] {
-            print 'found=true' >> $GITHUB_OUTPUT
-          } else {
-            print 'found=false' >> $GITHUB_OUTPUT
-          }
-
-      - name: Install Apple Developer Certificate
-        if: ${{ github.event_name != 'pull_request' && steps.setup.outputs.haveCodesignIdent == 'true' }}
-        uses: apple-actions/import-codesign-certs@253ddeeac23f2bdad1646faac5c8c2832e800071
-        with:
-          keychain-password: ${{ github.run_id }}
-          p12-file-base64: ${{ secrets.MACOS_SIGNING_CERT }}
-          p12-password: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
-
-      - name: Set Signing Identity
-        if: ${{ github.event_name != 'pull_request' && steps.setup.outputs.haveCodesignIdent == 'true' }}
-        run: |
-          print "CODESIGN_IDENT=${{ secrets.MACOS_SIGNING_APPLICATION_IDENTITY }}" >> $GITHUB_ENV
-          print "CODESIGN_IDENT_INSTALLER=${{ secrets.MACOS_SIGNING_INSTALLER_IDENTITY }}" >> $GITHUB_ENV
-
-      - name: Build Plugin
-        uses: ./plugin/.github/actions/build-plugin
-        with:
-          workingDirectory: ${{ github.workspace }}/plugin
-          target: ${{ matrix.arch }}
-          config: RelWithDebInfo
-          codesign: 'true'
-          codesignIdent: ${{ env.CODESIGN_IDENT }}
-
-      - name: Package Plugin
-        uses: ./plugin/.github/actions/package-plugin
-        with:
-          workingDirectory: ${{ github.workspace }}/plugin
-          target: ${{ matrix.arch }}
-          config: RelWithDebInfo
-          codesign: ${{ github.event_name != 'pull_request' && steps.setup.outputs.haveCodesignIdent == 'true' }}
-          notarize: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name != 'pull_request' && steps.setup.outputs.haveNotarizationUser == 'true' }}
-          codesignIdent: ${{ env.CODESIGN_IDENT }}
-          installerIdent: ${{ env.CODESIGN_IDENT_INSTALLER }}
-          codesignUser: ${{ secrets.MACOS_NOTARIZATION_USERNAME }}
-          codesignPass: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
-
-      - name: Upload Build Artifact
-        uses: actions/upload-artifact@v4.3.1
-        with:
-          name: ${{ env.PLUGIN_NAME }}-macos-${{ matrix.arch }}-${{ steps.setup.outputs.commitHash }}
-          path: ${{ github.workspace }}/plugin/release/${{ env.PLUGIN_NAME }}-*-macos-${{ matrix.arch }}.pkg
-  linux-in-tree:
-    name: 'Linux'
-    runs-on: ${{ matrix.ubuntu }}
-    strategy:
-      fail-fast: false
-      matrix:
-        ubuntu: ['ubuntu-22.04']
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4.1.1
-        with:
-          repository: obsproject/obs-studio
-          ref: ${{ env.OBS_VERSION }}
-          submodules: 'recursive'
-      - name: "Checkout plugin"
-        uses: actions/checkout@v4.1.1
-        with:
-          path: plugins/${{ env.PLUGIN_NAME }}
-      - name: Add plugin to obs cmake
-        shell: bash
-        run: echo "add_subdirectory(${{ env.PLUGIN_NAME }})" >> plugins/CMakeLists.txt
-      - name: Fetch Git Tags
-        run: git fetch --prune --tags --unshallow
-      - name: 'Install dependencies'
-        run: CI/linux/01_install_dependencies.sh --disable-pipewire
-      - name: 'Configure'
-        shell: bash
-        run: |
-          mkdir ./build
-          cmake -S . -B "./build" -G Ninja -DCMAKE_BUILD_TYPE="RelWithDebInfo" -DLINUX_PORTABLE=OFF -DENABLE_AJA=OFF -DENABLE_NEW_MPEGTS_OUTPUT=OFF -DBUILD_CAPTIONS=OFF -DWITH_RTMPS=OFF -DBUILD_BROWSER=OFF -DBUILD_VIRTUALCAM=OFF -DBUILD_VST=OFF -DENABLE_PIPEWIRE=OFF -DENABLE_SCRIPTING=OFF
-      - name: 'Build'
-        shell: bash
-        run: |
-          cmake --build "./build"
-      - name: 'Package'
-        shell: bash
-        run: |
-          FILE_DATE=$(date +%Y-%m-%d)
-          FILE_NAME=${{ env.PLUGIN_NAME }}-$FILE_DATE-${{ github.sha }}-${{ matrix.ubuntu }}.tar.gz
-          echo "FILE_NAME=${FILE_NAME}" >> $GITHUB_ENV
-          mkdir -p ./${{ env.PLUGIN_NAME }}/bin/64bit/
-          mv ./build/plugins/${{ env.PLUGIN_NAME }}/${{ env.PLUGIN_NAME }}.so ./${{ env.PLUGIN_NAME }}/bin/64bit/${{ env.PLUGIN_NAME }}.so
-          mv ./plugins/${{ env.PLUGIN_NAME }}/data ./${{ env.PLUGIN_NAME }}/data
-          tar -cvzf "${FILE_NAME}" ${{ env.PLUGIN_NAME }}
-      - name: 'Publish'
-        uses: actions/upload-artifact@v4.3.1
-        with:
-          name: '${{ env.FILE_NAME }}'
-          path: '*.tar.gz'
-  windows-build:
-    name: 'Windows Build'
-    runs-on: [windows-2022]
-    strategy:
-      fail-fast: true
-      matrix:
-        target: [x64, x86]
-        include:
-          - target: x64
-            cmake_build: 'x64'
-            deps_ext: '64'
-          - target: x86
-            cmake_build: 'Win32'
-            deps_ext: '32'
-    env:
-      QT_VERSION: '6.3.1'
-      CMAKE_GENERATOR: "Visual Studio 17 2022"
-      CMAKE_SYSTEM_VERSION: "10.0.18363.657"
-      WINDOWS_DEPS_VERSION: '2022-08-02'
-    steps:
-      - name: Add msbuild to PATH
-        uses: microsoft/setup-msbuild@v2
-      - name: Checkout obs
-        uses: actions/checkout@v4.1.1
-        with:
-          repository: obsproject/obs-studio
-          ref: ${{ env.OBS_VERSION }}
-          submodules: 'recursive'
       - name: Checkout plugin
-        uses: actions/checkout@v4.1.1
+        uses: actions/checkout@v7.0.1
         with:
-          path: plugins/${{ env.PLUGIN_NAME}}
-      - name: Add plugin to obs cmake
-        shell: cmd
-        run: echo add_subdirectory(${{ env.PLUGIN_NAME }}) > plugins/CMakeLists.txt
-      - name: Fetch Git Tags
-        run: git fetch --prune --tags --unshallow
-      - name: 'Install prerequisite: QT'
+          path: plugins/obs-shaderfilter
+      - name: Checkout vcpkg
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ env.VCPKG_VERSION }}
+          path: vcpkg
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Test packaging
+        run: python -m unittest discover -s "plugins/$PLUGIN_NAME/tests" -p 'test_package_ci.py' -v
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
         run: |
-          curl -kLO https://github.com/obsproject/obs-deps/releases/download/${{ env.WINDOWS_DEPS_VERSION }}/windows-deps-qt6-${{ env.WINDOWS_DEPS_VERSION }}-${{ matrix.target }}.zip -f --retry 5 -C -
-          7z x windows-deps-qt6-${{ env.WINDOWS_DEPS_VERSION }}-${{ matrix.target }}.zip -o"${{ github.workspace }}/cmbuild/deps"
-      - name: 'Install prerequisite: Pre-built dependencies'
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config extra-cmake-modules \
+            libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
+            libavutil-dev libswresample-dev libswscale-dev libjansson-dev \
+            libcurl4-openssl-dev libgl-dev libegl-dev libdrm-dev libx11-dev libx11-xcb-dev \
+            libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev libxcb-xinput-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libwayland-dev libxkbcommon-dev wayland-protocols \
+            libpulse-dev libudev-dev libsimde-dev uuid-dev uthash-dev \
+            qt6-base-dev qt6-base-private-dev qt6-svg-dev zlib1g-dev
+      - name: Bootstrap vcpkg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          curl -kLO https://github.com/obsproject/obs-deps/releases/download/${{ env.WINDOWS_DEPS_VERSION }}/windows-deps-${{ env.WINDOWS_DEPS_VERSION }}-${{ matrix.target }}.zip -f --retry 5 -C -
-          7z x windows-deps-${{ env.WINDOWS_DEPS_VERSION }}-${{ matrix.target }}.zip -o"${{ github.workspace }}/cmbuild/deps"
+          & ./vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Bootstrap vcpkg (Unix)
+        if: runner.os != 'Windows'
+        run: ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+      - name: Install plugin dependencies
+        run: |
+          ./vcpkg/vcpkg install --triplet '${{ matrix.triplet }}' \
+            --x-manifest-root="$GITHUB_WORKSPACE/plugins/$PLUGIN_NAME" \
+            --x-install-root="$GITHUB_WORKSPACE/plugin-deps"
       - name: Configure
+        env:
+          BUILD_PRESET: ${{ matrix.preset }}
+          BUILD_ARCH: ${{ matrix.arch }}
+          DEPENDENCY_TRIPLET: ${{ matrix.triplet }}
         run: |
-          mkdir ./package
-          mkdir ./installer
-          mkdir ./installer/media
-          mkdir ./build
-          cmake -S . -B "${{ github.workspace }}/build" -G"${{ env.CMAKE_GENERATOR }}" -DCMAKE_PREFIX_PATH:PATH="${{ github.workspace }}/cmbuild/deps" -A"${{ matrix.cmake_build }}" -DCMAKE_SYSTEM_VERSION="${{ env.CMAKE_SYSTEM_VERSION }}" -DBUILD_BROWSER=false -DBUILD_VST=false -DBUILD_VIRTUALCAM=false -DBUILD_CAPTIONS=false -DCOMPILE_D3D12_HOOK=false -DENABLE_SCRIPTING=false -DDepsPath="${{ github.workspace }}/cmbuild/deps" -DDepsPath${{ matrix.deps_ext }}="${{ github.workspace }}/cmbuild/deps" -DQTDIR="${{ github.workspace }}/cmbuild/deps/qt6" -DCOPIED_DEPENDENCIES=FALSE -DCOPY_DEPENDENCIES=TRUE -DENABLE_PLUGINS=TRUE -DDISABLE_PLUGINS=FALSE -DENABLE_BROWSER=FALSE -DENABLE_WEBSOCKET=FALSE
-      - name: 'Build'
-        run: msbuild /m /p:Configuration=RelWithDebInfo .\build\obs-studio.sln
+          # Build the plugin and OBS libraries, without configuring unrelated plugins.
+          printf 'add_subdirectory(%s)\n' "$PLUGIN_NAME" > plugins/CMakeLists.txt
+          extra_args=()
+          if [[ "$RUNNER_OS" == 'macOS' ]]; then
+            extra_args+=("-DCMAKE_OSX_ARCHITECTURES=$BUILD_ARCH" '-DOBS_CODESIGN_IDENTITY=-')
+          fi
+          cmake --preset "$BUILD_PRESET" -B build \
+            -DCMAKE_BUILD_TYPE=Release -DENABLE_FRONTEND=OFF -DENABLE_BROWSER=OFF \
+            -DENABLE_SCRIPTING=OFF -DENABLE_AJA=OFF -DENABLE_VLC=OFF \
+            -DENABLE_WAYLAND=OFF -DENABLE_PULSEAUDIO=OFF \
+            -DSHADERFILTER_FETCH_GLFW=OFF -DSHADERFILTER_BUILD_TESTS=ON \
+            "-Dpffft_DIR=$GITHUB_WORKSPACE/plugin-deps/$DEPENDENCY_TRIPLET/share/pffft" \
+            "-Dglfw3_DIR=$GITHUB_WORKSPACE/plugin-deps/$DEPENDENCY_TRIPLET/share/glfw3" \
+            "${extra_args[@]}"
+      - name: Build
+        run: |
+          cmake --build build --config Release --parallel 3 --target \
+            obs-shaderfilter shaderfilter-spectrum-test shaderfilter-audio-energy-test shaderfilter-gamepad-test
+      - name: Test audio and controller state
+        run: |
+          ctest --test-dir "build/plugins/$PLUGIN_NAME" -C Release --output-on-failure \
+            -R '^shaderfilter-(spectrum|audio-energy|gamepad-state)$'
       - name: Package
-        if: success()
         run: |
-          $env:FILE_NAME="${{ env.PLUGIN_NAME }}-${{ github.sha }}-windows-${{ matrix.target }}"
-          echo "FILE_NAME=${env:FILE_NAME}" >> ${env:GITHUB_ENV}
-          robocopy .\build\rundir\RelWithDebInfo\obs-plugins\${{ matrix.deps_ext }}bit\ .\package\obs-plugins\${{ matrix.deps_ext }}bit ${{ env.PLUGIN_NAME }}.* /E /XF .gitignore
-          robocopy .\build\rundir\RelWithDebInfo\data\obs-plugins\${{ env.PLUGIN_NAME }}\ .\package\data\obs-plugins\${{ env.PLUGIN_NAME }}\ /E /XF .gitignore
-          copy .\build\plugins\${{ env.PLUGIN_NAME }}\installer.iss .\installer\installer.iss
-          robocopy .\plugins\${{ env.PLUGIN_NAME}}\media\ .\installer\media\ /E /XF .gitignore
-          exit 0
-      - name: Publish zip
-        if: success()
-        uses: actions/upload-artifact@v4.3.1
+          python "plugins/$PLUGIN_NAME/.github/scripts/package-ci.py" \
+            --build-dir "build/plugins/$PLUGIN_NAME" --config Release \
+            --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}' --output dist
+      - name: Upload portable package
+        uses: actions/upload-artifact@v7.0.1
         with:
-          name: '${{ env.FILE_NAME }}'
-          path: package/*
-      - name: Publish Installer Files
-        if: success() && matrix.target == 'x64'
-        uses: actions/upload-artifact@v4.3.1
+          name: obs-shaderfilter-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+      - name: Upload Windows installer inputs
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7.0.1
         with:
-          name: 'installer-files'
-          path: installer/*
+          name: windows-installer-inputs
+          path: |
+            dist/package/
+            dist/media/
+            dist/installer.iss
+          if-no-files-found: error
+
   windows-package:
-    name: 'Windows Package'
-    runs-on: [windows-latest]
-    needs: [windows-build]
+    name: Windows installer
+    runs-on: windows-2022
+    needs: build
     steps:
-      - name: Init
-        if: success()
+      - name: Download installer inputs
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: windows-installer-inputs
+      - name: Compile installer
+        shell: pwsh
         run: |
-          mkdir ./package
-          $env:FILE_DATE=(Get-Date -UFormat "%F")
-          $env:FILE_NAME="${{ env.PLUGIN_NAME }}-${env:FILE_DATE}-${{ github.sha }}-windows"
-          echo "FILE_NAME=${env:FILE_NAME}" >> ${env:GITHUB_ENV}
-          $env:FILE_NAME_X86="${{ env.PLUGIN_NAME }}-${{ github.sha }}-windows-x86"
-          echo "FILE_NAME_X86=${env:FILE_NAME_X86}" >> ${env:GITHUB_ENV}
-          $env:FILE_NAME_X64="${{ env.PLUGIN_NAME }}-${{ github.sha }}-windows-x64"
-          echo "FILE_NAME_X64=${env:FILE_NAME_X64}" >> ${env:GITHUB_ENV}
-      - name: Retrieve x86 build
-        uses: actions/download-artifact@v4.1.2
+          $compiler = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (!(Test-Path -LiteralPath $compiler)) {
+            choco install innosetup --version=6.4.3 --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          & $compiler /Qp ./installer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload installer
+        uses: actions/upload-artifact@v7.0.1
         with:
-          name: '${{ env.FILE_NAME_X86 }}'
-          path: ./package
-      - name: Retrieve x64 build
-        uses: actions/download-artifact@v4.1.2
-        with:
-          name: '${{ env.FILE_NAME_X64 }}'
-          path: ./package
-      - name: Retrieve installer files
-        uses: actions/download-artifact@v4.1.2
-        with:
-          name: 'installer-files'
-          path: .
-      - name: Publish zip
-        if: success()
-        uses: actions/upload-artifact@v4.3.1
-        with:
-          name: '${{ env.FILE_NAME }}'
-          path: package/*
-      - name: "Package Installer (Compile)"
-        run: |
-          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' /Qp ".\installer.iss"
-      - name: Publish installer
-        if: success()
-        uses: actions/upload-artifact@v4.3.1
-        with:
-          name: '${{ env.FILE_NAME }}-installer'
+          name: obs-shaderfilter-windows-x64-${{ github.sha }}-installer
           path: package/*.exe
-      - name: Remove temp artifacts
-        uses: geekyeggo/delete-artifact@v5.1.0
-        with:
-          name: "${{ env.FILE_NAME_X86 }}\n${{ env.FILE_NAME_X64 }}"
+          if-no-files-found: error

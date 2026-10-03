@@ -298,6 +298,16 @@ If you wish to build the obs-shaderfilter plugin from source, you should just ne
 and the OBS Studio libraries and headers, Qt6, GLFW, and PFFFT. The pinned
 `vcpkg.json` supplies GLFW/PFFFT; see [dependency setup and test commands](SHADER_HELPERS.md#building-and-checking).
 
+GitHub Actions builds against OBS 31.1.2 using its CMake presets and matching
+OBS dependency downloads. It installs the pinned vcpkg manifest separately for
+each architecture, keeping GLFW and PFFFT static. Pushes and pull requests to
+`master` or `main`, and manual workflow runs, build Windows x64, Ubuntu 24.04
+x64, and macOS Intel/Apple Silicon packages. Windows x86 is no longer built.
+The artifacts contain a Windows portable ZIP and installer, a Linux archive
+to extract under `/usr`, and macOS plugin bundles to extract into
+`~/Library/Application Support/obs-studio/plugins`. macOS packages are unsigned
+and are provided separately for each architecture rather than as a universal PKG.
+
 * [obs-shaderfilter source repository](https://github.com/exeldro/obs-shaderfilter)
 * [OBS Studio source repository](https://github.com/obsproject/obs-studio)
 

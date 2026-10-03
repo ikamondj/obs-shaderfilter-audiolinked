@@ -307,6 +307,10 @@ The artifacts contain a Windows portable ZIP and installer, a Linux archive
 to extract under `/usr`, and macOS plugin bundles to extract into
 `~/Library/Application Support/obs-studio/plugins`. macOS packages are unsigned
 and are provided separately for each architecture rather than as a universal PKG.
+The Windows installer is compiled in the Windows build job and uploaded as
+`obs-shaderfilter-windows-x64-installer-<commit>`. Download and extract that
+artifact to run `obs-shaderfilter-installer.exe`; builds on other platforms
+do not block its creation.
 
 * [obs-shaderfilter source repository](https://github.com/exeldro/obs-shaderfilter)
 * [OBS Studio source repository](https://github.com/obsproject/obs-studio)

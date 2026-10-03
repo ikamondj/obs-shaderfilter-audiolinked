@@ -1,4 +1,4 @@
-/* Generated from data/internal/*.effect; edit those files. */
+// Generated from the effect files in data/internal; edit those files.
 #pragma once
 static const char *effect_template_helpers =
 "@SHADER_HELPERS@";

@@ -1,0 +1,18 @@
+// spec is explicitly declared by the shader; it is never part of the preamble.
+sampler_state sf_spectrum_sampler {
+    Filter = Linear;
+    AddressU = Clamp;
+    AddressV = Clamp;
+};
+
+// Two-argument spectrum calls are routed here by shader-spectrum-effect.h;
+// OBS resolves effect dependencies by name and cannot retain both overloads.
+float sf_spectrum_sample(float pitch, float falloff)
+{
+    return spec.Sample(sf_spectrum_sampler, float2(saturate(pitch), 0.125 + 0.75 * saturate(falloff))).r;
+}
+
+float spectrum(float pitch)
+{
+    return sf_spectrum_sample(pitch, 0.0);
+}

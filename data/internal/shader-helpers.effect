@@ -1,0 +1,258 @@
+// Embedded after the standard preamble by CMake. No texture lookups in noise.
+
+float3 hsv2hsl(float3 hsv)
+{
+    float lightness = hsv.z * (1.0 - 0.5 * hsv.y);
+    float denominator = min(lightness, 1.0 - lightness);
+    float saturation = denominator > 0.0 ? (hsv.z - lightness) / max(denominator, 1.0e-20) : 0.0;
+    return float3(frac(hsv.x), saturation, lightness);
+}
+
+float3 hsl2hsv(float3 hsl)
+{
+    float value = hsl.z + hsl.y * min(hsl.z, 1.0 - hsl.z);
+    float saturation = value > 0.0 ? 2.0 * (1.0 - hsl.z / max(value, 1.0e-20)) : 0.0;
+    return float3(frac(hsl.x), saturation, value);
+}
+
+float3 rgb2hsl(float3 rgb)
+{
+    return hsv2hsl(rgb2hsv(rgb));
+}
+
+float3 hsl2rgb(float3 hsl)
+{
+    return hsv2rgb(hsl2hsv(hsl));
+}
+
+// OKLCH = (lightness, chroma, hue in turns), D65/sRGB primaries.
+// Matrices: Bjorn Ottosson's public-domain Oklab reference (2021 revision).
+// https://bottosson.github.io/posts/oklab/#converting-from-linear-srgb-to-oklab
+// Signed transfer curves preserve out-of-gamut RGB instead of clipping it.
+float sf_oklch_decode_srgb(float channel)
+{
+    float magnitude = abs(channel);
+    if (magnitude <= 0.04045) return channel / 12.92;
+    return sign(channel) * pow((magnitude + 0.055) / 1.055, 2.4);
+}
+
+float sf_oklch_encode_srgb(float channel)
+{
+    float magnitude = abs(channel);
+    if (magnitude <= 0.0031308) return channel * 12.92;
+    return sign(channel) * (1.055 * pow(magnitude, 1.0 / 2.4) - 0.055);
+}
+
+float3 linrgb2oklch(float3 rgb)
+{
+    float3 lms = float3(
+        dot(rgb, float3(0.4122214708, 0.5363325363, 0.0514459929)),
+        dot(rgb, float3(0.2119034982, 0.6806995451, 0.1073969566)),
+        dot(rgb, float3(0.0883024619, 0.2817188376, 0.6299787005)));
+    // Signed cube root also supports negative/extended linear RGB.
+    lms = sign(lms) * pow(abs(lms), float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0));
+    float3 lab = float3(
+        dot(lms, float3(0.2104542553, 0.7936177850, -0.0040720468)),
+        dot(lms, float3(1.9779984951, -2.4285922050, 0.4505937099)),
+        dot(lms, float3(0.0259040371, 0.7827717662, -0.8086757660)));
+    float chroma = length(lab.yz);
+    // Hue is undefined for neutrals; canonicalize matrix/float roundoff.
+    if (chroma <= 0.000001) return float3(lab.x, 0.0, 0.0);
+    return float3(lab.x, chroma, frac(atan2(lab.z, lab.y) / 6.283185307179586));
+}
+
+float3 oklch2linrgb(float3 lch)
+{
+    float angle = frac(lch.z) * 6.283185307179586;
+    float chroma = max(lch.y, 0.0);
+    float3 lab = float3(lch.x, chroma * cos(angle), chroma * sin(angle));
+    float3 lms = float3(
+        dot(lab, float3(1.0, 0.3963377774, 0.2158037573)),
+        dot(lab, float3(1.0, -0.1055613458, -0.0638541728)),
+        dot(lab, float3(1.0, -0.0894841775, -1.2914855480)));
+    lms = lms * lms * lms;
+    return float3(
+        dot(lms, float3(4.0767416621, -3.3077115913, 0.2309699292)),
+        dot(lms, float3(-1.2684380046, 2.6097574011, -0.3413193965)),
+        dot(lms, float3(-0.0041960863, -0.7034186147, 1.7076147010)));
+}
+
+float3 rgb2oklch(float3 rgb)
+{
+    return linrgb2oklch(float3(sf_oklch_decode_srgb(rgb.r), sf_oklch_decode_srgb(rgb.g), sf_oklch_decode_srgb(rgb.b)));
+}
+
+float3 oklch2rgb(float3 lch)
+{
+    float3 rgb = oklch2linrgb(lch);
+    return float3(sf_oklch_encode_srgb(rgb.r), sf_oklch_encode_srgb(rgb.g), sf_oklch_encode_srgb(rgb.b));
+}
+
+float3 hsv2oklch(float3 hsv)
+{
+    return rgb2oklch(hsv2rgb(hsv));
+}
+
+float3 oklch2hsv(float3 lch)
+{
+    // Conventional HSV/HSL use bounded sRGB: clip only in these wrappers.
+    return rgb2hsv(saturate(oklch2rgb(lch)));
+}
+
+float3 hsl2oklch(float3 hsl)
+{
+    return rgb2oklch(hsl2rgb(hsl));
+}
+
+float3 oklch2hsl(float3 lch)
+{
+    return rgb2hsl(saturate(oklch2rgb(lch)));
+}
+
+// Lattice permutation stays in a float-exact integer range. Period: 289 cells.
+float sf_noise_permute(float x)
+{
+    x = x - floor(x / 289.0) * 289.0;
+    float y = (34.0 * x + 1.0) * x;
+    return y - floor(y / 289.0) * 289.0;
+}
+
+float sf_noise_hash(float4 cell)
+{
+    return sf_noise_permute(sf_noise_permute(sf_noise_permute(sf_noise_permute(cell.w) + cell.z) + cell.y) + cell.x);
+}
+
+// 32 unit gradients: permutations of (+/-1, +/-1, +/-1, 0) / sqrt(3).
+float4 sf_noise_gradient(float4 cell)
+{
+    float h = sf_noise_hash(cell);
+    float3 signs = frac(floor(h / float3(1.0, 2.0, 4.0)) * 0.5) * 4.0 - 1.0;
+    float zero = floor(frac(floor(h / 8.0) / 4.0) * 4.0);
+    float4 gradient = float4(signs, 0.0);
+    if (zero < 1.0) gradient = float4(0.0, signs);
+    else if (zero < 2.0) gradient = float4(signs.x, 0.0, signs.yz);
+    else if (zero < 3.0) gradient = float4(signs.xy, 0.0, signs.z);
+    return gradient * 0.5773502691896258;
+}
+
+// xyz = analytic spatial derivative; w = scalar contribution.
+float4 sf_simplex_corner(float4 cell, float4 offset)
+{
+    float4 gradient = sf_noise_gradient(cell);
+    float m = max(0.6 - dot(offset, offset), 0.0);
+    float m2 = m * m;
+    float d = dot(gradient, offset);
+    return float4(m2 * m2 * gradient.xyz - 8.0 * m2 * m * d * offset.xyz, m2 * m2 * d);
+}
+
+float4 sf_simplex_derivative(float4 p)
+{
+    float4 cell = floor(p + dot(p, float4(0.30901699437494745, 0.30901699437494745, 0.30901699437494745, 0.30901699437494745)));
+    float4 x0 = p - cell + dot(cell, float4(0.1381966011250105, 0.1381966011250105, 0.1381966011250105, 0.1381966011250105));
+    // Rank coordinates, breaking ties by component index.
+    float4 rank = float4(0.0, 0.0, 0.0, 0.0);
+    float xy = step(x0.y, x0.x);
+    float xz = step(x0.z, x0.x);
+    float xw = step(x0.w, x0.x);
+    float yz = step(x0.z, x0.y);
+    float yw = step(x0.w, x0.y);
+    float zw = step(x0.w, x0.z);
+    rank.x = xy + xz + xw;
+    rank.y = 1.0 - xy + yz + yw;
+    rank.z = 2.0 - xz - yz + zw;
+    rank.w = 3.0 - xw - yw - zw;
+    float4 i1 = saturate(rank - 2.0);
+    float4 i2 = saturate(rank - 1.0);
+    float4 i3 = saturate(rank);
+    return 49.0 * (sf_simplex_corner(cell, x0)
+        + sf_simplex_corner(cell + i1, x0 - i1 + 0.1381966011250105)
+        + sf_simplex_corner(cell + i2, x0 - i2 + 0.2763932022500210)
+        + sf_simplex_corner(cell + i3, x0 - i3 + 0.4145898033750315)
+        + sf_simplex_corner(cell + 1.0, x0 - 0.4472135954999580));
+}
+
+float simplex_noise(float4 p)
+{
+    return sf_simplex_derivative(p).w;
+}
+
+// Improved Perlin: 16 gradient corners, quintic interpolation in all 4 axes.
+float perlin_noise(float4 p)
+{
+    float4 cell = floor(p);
+    float4 f = p - cell;
+    float4 fade = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float value = 0.0;
+    for (int w = 0; w <= 1; ++w) {
+        for (int z = 0; z <= 1; ++z) {
+            for (int y = 0; y <= 1; ++y) {
+                for (int x = 0; x <= 1; ++x) {
+                    float4 corner = float4(x, y, z, w);
+                    float4 weight = lerp(1.0 - fade, fade, corner);
+                    value += dot(sf_noise_gradient(cell + corner), f - corner) * weight.x * weight.y * weight.z * weight.w;
+                }
+            }
+        }
+    }
+    return value;
+}
+
+// Normalized fractal sum. Bounded to 1..8 octaves; frequency/lacunarity > 0.
+float perlin_noise_fbm(float4 p, int octaves, float frequency, float lacunarity, float persistence)
+{
+    p *= max(frequency, 0.0001);
+    lacunarity = max(lacunarity, 0.0001);
+    persistence = saturate(persistence);
+    float result = 0.0;
+    float amplitude = 1.0;
+    float total = 0.0;
+    int count = clamp(octaves, 1, 8);
+    for (int octave = 0; octave < count; ++octave) {
+        result += amplitude * perlin_noise(p);
+        total += amplitude;
+        p *= lacunarity;
+        amplitude *= persistence;
+    }
+    return result / total;
+}
+
+// Curl of three decorrelated scalar potentials. Three analytic evaluations
+// replace 18 scalar finite-difference evaluations. Deliberately unnormalized
+// to preserve the divergence-free field; w is a continuous time coordinate.
+float3 curl_noise(float4 p)
+{
+    float3 dx = sf_simplex_derivative(p).xyz;
+    float3 dy = sf_simplex_derivative(p + float4(31.7, 47.3, 11.9, 7.1)).xyz;
+    float3 dz = sf_simplex_derivative(p + float4(67.1, 13.7, 53.3, 19.9)).xyz;
+    return float3(dz.y - dy.z, dx.z - dz.x, dy.x - dx.y);
+}
+
+float4 sf_voronoi_point(float4 cell)
+{
+    float h = sf_noise_hash(cell);
+    // Bounded jitter (middle third of each cell) makes the 3^4 search exact:
+    // a point in the current cell is <=4/3 away, excluded cells are >=4/3.
+    float4 hash = float4(sf_noise_permute(h + 17.0), sf_noise_permute(h + 59.0),
+                        sf_noise_permute(h + 113.0), sf_noise_permute(h + 191.0));
+    return 1.0 / 3.0 + hash / 867.0;
+}
+
+// Euclidean F1 distance in a four-dimensional jittered Voronoi lattice.
+float voronoi_noise(float4 p)
+{
+    float4 cell = floor(p);
+    float4 f = p - cell;
+    float nearest = 4.0;
+    for (int w = -1; w <= 1; ++w) {
+        for (int z = -1; z <= 1; ++z) {
+            for (int y = -1; y <= 1; ++y) {
+                for (int x = -1; x <= 1; ++x) {
+                    float4 neighbor = float4(x, y, z, w);
+                    float4 offset = neighbor + sf_voronoi_point(cell + neighbor) - f;
+                    nearest = min(nearest, dot(offset, offset));
+                }
+            }
+        }
+    }
+    return sqrt(nearest);
+}

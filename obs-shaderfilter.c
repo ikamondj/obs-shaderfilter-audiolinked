@@ -18,19 +18,36 @@
 #include <math.h>
 
 #include <util/threading.h>
+#include "shader-gamepad.h"
+#include "shader-audio-energy.h"
+#include "shader-spectrum.h"
+#include "shader-spectrum-effect.h"
+#include "shader-tools.h"
+#include "shader-helpers.generated.h"
+
+#ifndef PROJECT_VERSION
+#define PROJECT_VERSION "2.0"
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <sys/time.h>
 #endif
 
-#include "version.h"
+#define AUDIO_BAND_COUNTER_WRAP 166320.0f
+#define AUDIO_TIMESERIES_BUFFER_WIDTH 512
+#define AUDIO_TIMESERIES_BUFFER_HEIGHT 1
+#define AUDIO_BAND_COUNT 4
+#define AUDIO_CROSSOVER_COUNT 5
 
-float (*move_get_transition_filter)(obs_source_t *filter_from, obs_source_t **filter_to) = NULL;
+typedef float (*move_get_transition_filter_t)(obs_source_t *source, obs_source_t **filter);
+static move_get_transition_filter_t move_get_transition_filter = NULL;
+/* OpenGL controller upload shared by all filters; graphics thread only. */
+static gs_texture_t *gamepad_texture;
+static uint64_t gamepad_texture_frame = UINT64_MAX;
 
-#define nullptr ((void *)0)
-
-static const char *effect_template_begin = "\
+static const char *effect_template_begin = "\n\
 uniform float4x4 ViewProj;\n\
 uniform texture2d image;\n\
 \n\
@@ -49,6 +66,59 @@ uniform float elapsed_time_enable;\n\
 uniform int loops;\n\
 uniform float loop_second;\n\
 uniform float local_time;\n\
+uniform float audio_peak;\n\
+uniform float audio_magnitude;\n\
+uniform float energy;\n\
+uniform float e_bass;\n\
+uniform float e_lows;\n\
+uniform float e_mids;\n\
+uniform float e_treb;\n\
+uniform float bass;\n\
+uniform float lows;\n\
+uniform float mids;\n\
+uniform float treb;\n\
+uniform float bass_c;\n\
+uniform float lows_c;\n\
+uniform float mids_c;\n\
+uniform float treb_c;\n\
+uniform texture2d t_bass;\n\
+uniform texture2d t_lows;\n\
+uniform texture2d t_mids;\n\
+uniform texture2d t_treb;\n\
+\n\
+uniform float ef_bass_fast;\n\
+uniform float ef_bass_medium;\n\
+uniform float ef_bass_slow;\n\
+uniform float ef_bass_slug;\n\
+uniform float ef_lows_fast;\n\
+uniform float ef_lows_medium;\n\
+uniform float ef_lows_slow;\n\
+uniform float ef_lows_slug;\n\
+uniform float ef_mids_fast;\n\
+uniform float ef_mids_medium;\n\
+uniform float ef_mids_slow;\n\
+uniform float ef_mids_slug;\n\
+uniform float ef_treb_fast;\n\
+uniform float ef_treb_medium;\n\
+uniform float ef_treb_slow;\n\
+uniform float ef_treb_slug;\n\
+\n\
+uniform float lf_bass_fast;\n\
+uniform float lf_bass_medium;\n\
+uniform float lf_bass_slow;\n\
+uniform float lf_bass_slug;\n\
+uniform float lf_lows_fast;\n\
+uniform float lf_lows_medium;\n\
+uniform float lf_lows_slow;\n\
+uniform float lf_lows_slug;\n\
+uniform float lf_mids_fast;\n\
+uniform float lf_mids_medium;\n\
+uniform float lf_mids_slow;\n\
+uniform float lf_mids_slug;\n\
+uniform float lf_treb_fast;\n\
+uniform float lf_treb_medium;\n\
+uniform float lf_treb_slow;\n\
+uniform float lf_treb_slug;\n\
 \n\
 sampler_state textureSampler{\n\
 	Filter = Linear;\n\
@@ -70,6 +140,20 @@ VertData mainTransform(VertData v_in)\n\
 	return vert_out;\n\
 }\n\
 \n\
+float4 acc(float rate) {\n\
+	float divisor = pow(166320.0, saturate(1.0 - rate));\n\
+	return frac(float4(bass_c, lows_c, mids_c, treb_c) / divisor);\n\
+}\n\
+\n\
+float4 ts(float x) {\n\
+	float2 uv = float2(x, 0.5);\n\
+	float bass_val = t_bass.Sample(textureSampler, uv).x;\n\
+	float lows_val = t_lows.Sample(textureSampler, uv).x;\n\
+	float mids_val = t_mids.Sample(textureSampler, uv).x;\n\
+	float treb_val = t_treb.Sample(textureSampler, uv).x;\n\
+	return float4(bass_val, lows_val, mids_val, treb_val);\n\
+}\n\
+\n\
 float srgb_nonlinear_to_linear_channel(float u)\n\
 {\n\
 	return (u <= 0.04045) ? (u / 12.92) : pow((u + 0.055) / 1.055, 2.4);\n\
@@ -81,7 +165,84 @@ float3 srgb_nonlinear_to_linear(float3 v)\n\
 		      srgb_nonlinear_to_linear_channel(v.g),\n\
 		      srgb_nonlinear_to_linear_channel(v.b));\n\
 }\n\
-\n";
+\n\
+float interp_falloff5(float t, float p0, float p1, float p2, float p3, float p4) {\n\
+	t = saturate(t);\n\
+	float pos = t * 4.0;\n\
+	int idx = int(floor(pos));\n\
+	float f = frac(pos);\n\
+	if (idx == 0) return lerp(p0, p1, f);\n\
+	if (idx == 1) return lerp(p1, p2, f);\n\
+	if (idx == 2) return lerp(p2, p3, f);\n\
+	if (idx == 3) return lerp(p3, p4, f);\n\
+	return p4;\n\
+}\n\
+\n\
+float4 sf_expfoff(float4 tailLengths) {\n\
+	return float4(\n\
+		interp_falloff5(tailLengths.x, bass, ef_bass_fast, ef_bass_medium, ef_bass_slow, ef_bass_slug),\n\
+		interp_falloff5(tailLengths.y, lows, ef_lows_fast, ef_lows_medium, ef_lows_slow, ef_lows_slug),\n\
+		interp_falloff5(tailLengths.z, mids, ef_mids_fast, ef_mids_medium, ef_mids_slow, ef_mids_slug),\n\
+		interp_falloff5(tailLengths.w, treb, ef_treb_fast, ef_treb_medium, ef_treb_slow, ef_treb_slug));\n\
+}\n\
+\n\
+#define expfoff(tailLengths) sf_expfoff(float4(0.0, 0.0, 0.0, 0.0) + (tailLengths))\n\
+\n\
+float4 sf_linfoff(float4 tailLengths) {\n\
+	return float4(\n\
+		interp_falloff5(tailLengths.x, bass, lf_bass_fast, lf_bass_medium, lf_bass_slow, lf_bass_slug),\n\
+		interp_falloff5(tailLengths.y, lows, lf_lows_fast, lf_lows_medium, lf_lows_slow, lf_lows_slug),\n\
+		interp_falloff5(tailLengths.z, mids, lf_mids_fast, lf_mids_medium, lf_mids_slow, lf_mids_slug),\n\
+		interp_falloff5(tailLengths.w, treb, lf_treb_fast, lf_treb_medium, lf_treb_slow, lf_treb_slug));\n\
+}\n\
+\n\
+#define linfoff(tailLengths) sf_linfoff(float4(0.0, 0.0, 0.0, 0.0) + (tailLengths))\n\
+\n\
+float3 hsv2rgb(float3 hsv) {\n\
+	float3 rgb = float3(hsv.z, hsv.z, hsv.z);\n\
+	if (hsv.y > 0.0f) {\n\
+		float h = frac(hsv.x) * 6.0f;\n\
+		int i = int(floor(h));\n\
+		float f = h - i;\n\
+		float p = hsv.z * (1.0f - hsv.y);\n\
+		float q = hsv.z * (1.0f - hsv.y * f);\n\
+		float t = hsv.z * (1.0f - hsv.y * (1.0f - f));\n\
+		if (i == 0) rgb = float3(hsv.z, t, p);\n\
+		else if (i == 1) rgb = float3(q, hsv.z, p);\n\
+		else if (i == 2) rgb = float3(p, hsv.z, t);\n\
+		else if (i == 3) rgb = float3(p, q, hsv.z);\n\
+		else if (i == 4) rgb = float3(t, p, hsv.z);\n\
+		else rgb = float3(hsv.z, p, q);\n\
+	}\n\
+	return rgb;\n\
+}\n\
+\n\
+float3 rgb2hsv(float3 rgb) {\n\
+	float maxc = max(rgb.r, max(rgb.g, rgb.b));\n\
+	float minc = min(rgb.r, min(rgb.g, rgb.b));\n\
+	float delta = maxc - minc;\n\
+	float3 hsv;\n\
+	hsv.z = maxc;\n\
+	if (delta > 0.00001f) {\n\
+		hsv.y = delta / maxc;\n\
+		if (rgb.r >= maxc) hsv.x = (rgb.g - rgb.b) / delta;\n\
+		else if (rgb.g >= maxc) hsv.x = 2.0f + (rgb.b - rgb.r) / delta;\n\
+		else hsv.x = 4.0f + (rgb.r - rgb.g) / delta;\n\
+		hsv.x /= 6.0f;\n\
+		if (hsv.x < 0.0f) hsv.x += 1.0f;\n\
+	} else {\n\
+		hsv.y = 0.0f;\n\
+		hsv.x = 0.0f;\n\
+	}\n\
+	return hsv;\n\
+}\n\
+\n\
+float cu_bass(float speed) { return acc(speed).x; }\n\
+float cu_lows(float speed) { return acc(speed).y; }\n\
+float cu_mids(float speed) { return acc(speed).z; }\n\
+float cu_treb(float speed) { return acc(speed).w; }\n\
+";
+
 
 static const char *effect_template_default_image_shader = "\n\
 float4 mainImage(VertData v_in) : TARGET\n\
@@ -165,6 +326,50 @@ struct effect_param_data {
 	} step;
 };
 
+enum audio_band {
+	AUDIO_BAND_BASS,
+	AUDIO_BAND_LOWS,
+	AUDIO_BAND_MIDS,
+	AUDIO_BAND_TREB,
+};
+
+enum audio_falloff_speed {
+	AUDIO_FALLOFF_FAST,
+	AUDIO_FALLOFF_MEDIUM,
+	AUDIO_FALLOFF_SLOW,
+	AUDIO_FALLOFF_SLUG,
+};
+
+struct audio_source_analysis {
+	struct audio_source_analysis *next;
+	obs_weak_source_t *source;
+	size_t users;
+	pthread_mutex_t mutex;
+	uint32_t sample_rate;
+	float lowpass_alpha[AUDIO_CROSSOVER_COUNT];
+	float lowpass_state[MAX_AUDIO_CHANNELS][AUDIO_CROSSOVER_COUNT];
+	float band_weights[AUDIO_BAND_COUNT];
+	uint64_t capture_ns;
+	float capture_seconds;
+	struct sf_audio_energy energy_window;
+	struct sf_spectrum *spectrum;
+	size_t spectrum_users;
+	float audio_peak;
+	float audio_magnitude;
+	float bands[AUDIO_BAND_COUNT];
+	float cumulative[AUDIO_BAND_COUNT];
+	float exp_falloff[AUDIO_BAND_COUNT][AUDIO_FALLOFF_SLUG + 1];
+	float lin_falloff[AUDIO_BAND_COUNT][AUDIO_FALLOFF_SLUG + 1];
+	float history[AUDIO_BAND_COUNT][AUDIO_TIMESERIES_BUFFER_WIDTH];
+	float history_smooth[AUDIO_BAND_COUNT];
+	size_t history_write_pos;
+};
+
+/* The registry lock protects membership/reference counts; each entry lock
+ * protects results shared between the audio and video threads. */
+static pthread_mutex_t audio_analyses_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct audio_source_analysis *audio_analyses;
+
 struct shader_filter_data {
 	obs_source_t *context;
 	gs_effect_t *effect;
@@ -227,7 +432,119 @@ struct shader_filter_data {
 	gs_eparam_t *param_convert_linear;
 	gs_eparam_t *param_previous_output;
 	gs_eparam_t *param_audio_peak;
+	gs_eparam_t *param_gamepad_available;
+	gs_eparam_t *param_gamepad_info;
+	gs_eparam_t *param_gamepad_buttons;
+	gs_eparam_t *param_gamepad_presses;
+	gs_eparam_t *param_gamepad_axes;
+	gs_eparam_t *param_gamepad_axes_c;
+	gs_eparam_t *param_gamepad_axes_clamped;
+	gs_eparam_t *param_gamepad_data;
 	gs_eparam_t *param_audio_magnitude;
+	gs_eparam_t *param_energy;
+	gs_eparam_t *param_e_bass;
+	gs_eparam_t *param_e_lows;
+	gs_eparam_t *param_e_mids;
+	gs_eparam_t *param_e_treb;
+	gs_eparam_t *param_bass;
+	gs_eparam_t *param_lows;
+	gs_eparam_t *param_mids;
+	gs_eparam_t *param_treb;
+	gs_eparam_t *param_bass_c;
+	gs_eparam_t *param_lows_c;
+	gs_eparam_t *param_mids_c;
+	gs_eparam_t *param_treb_c;
+
+	// Audio timeseries textures
+	gs_eparam_t *param_t_bass;
+	gs_eparam_t *param_spec;
+	gs_texture_t *spec_texture;
+	float spec_values[SF_SPECTRUM_VALUES];
+	uint64_t spec_revision;
+	uint64_t spec_uploaded_revision;
+	bool spectrum_registered;
+	bool spectrum_declared;
+	gs_eparam_t *param_t_lows;
+	gs_eparam_t *param_t_mids;
+	gs_eparam_t *param_t_treb;
+	gs_texrender_t *t_bass_render;
+	gs_texrender_t *t_lows_render;
+	gs_texrender_t *t_mids_render;
+	gs_texrender_t *t_treb_render;
+	float *t_bass_buffer;
+	float *t_lows_buffer;
+	float *t_mids_buffer;
+	float *t_treb_buffer;
+
+	// Exponential falloff presets (4 per channel)
+	gs_eparam_t *param_ef_bass_fast;
+	gs_eparam_t *param_ef_bass_medium;
+	gs_eparam_t *param_ef_bass_slow;
+	gs_eparam_t *param_ef_bass_slug;
+	gs_eparam_t *param_ef_lows_fast;
+	gs_eparam_t *param_ef_lows_medium;
+	gs_eparam_t *param_ef_lows_slow;
+	gs_eparam_t *param_ef_lows_slug;
+	gs_eparam_t *param_ef_mids_fast;
+	gs_eparam_t *param_ef_mids_medium;
+	gs_eparam_t *param_ef_mids_slow;
+	gs_eparam_t *param_ef_mids_slug;
+	gs_eparam_t *param_ef_treb_fast;
+	gs_eparam_t *param_ef_treb_medium;
+	gs_eparam_t *param_ef_treb_slow;
+	gs_eparam_t *param_ef_treb_slug;
+
+	float ef_bass_fast;
+	float ef_bass_medium;
+	float ef_bass_slow;
+	float ef_bass_slug;
+	float ef_lows_fast;
+	float ef_lows_medium;
+	float ef_lows_slow;
+	float ef_lows_slug;
+	float ef_mids_fast;
+	float ef_mids_medium;
+	float ef_mids_slow;
+	float ef_mids_slug;
+	float ef_treb_fast;
+	float ef_treb_medium;
+	float ef_treb_slow;
+	float ef_treb_slug;
+
+	// Linear falloff presets (4 per channel)
+	gs_eparam_t *param_lf_bass_fast;
+	gs_eparam_t *param_lf_bass_medium;
+	gs_eparam_t *param_lf_bass_slow;
+	gs_eparam_t *param_lf_bass_slug;
+	gs_eparam_t *param_lf_lows_fast;
+	gs_eparam_t *param_lf_lows_medium;
+	gs_eparam_t *param_lf_lows_slow;
+	gs_eparam_t *param_lf_lows_slug;
+	gs_eparam_t *param_lf_mids_fast;
+	gs_eparam_t *param_lf_mids_medium;
+	gs_eparam_t *param_lf_mids_slow;
+	gs_eparam_t *param_lf_mids_slug;
+	gs_eparam_t *param_lf_treb_fast;
+	gs_eparam_t *param_lf_treb_medium;
+	gs_eparam_t *param_lf_treb_slow;
+	gs_eparam_t *param_lf_treb_slug;
+
+	float lf_bass_fast;
+	float lf_bass_medium;
+	float lf_bass_slow;
+	float lf_bass_slug;
+	float lf_lows_fast;
+	float lf_lows_medium;
+	float lf_lows_slow;
+	float lf_lows_slug;
+	float lf_mids_fast;
+	float lf_mids_medium;
+	float lf_mids_slow;
+	float lf_mids_slug;
+	float lf_treb_fast;
+	float lf_treb_medium;
+	float lf_treb_slow;
+	float lf_treb_slug;
 
 	int expand_left;
 	int expand_right;
@@ -252,14 +569,28 @@ struct shader_filter_data {
 	float rand_activation_f;
 	float audio_peak;
 	float audio_magnitude;
+	float energy;
+	float e_bass;
+	float e_lows;
+	float e_mids;
+	float e_treb;
+	float bass;
+	float lows;
+	float mids;
+	float treb;
+	float bass_c;
+	float lows_c;
+	float mids_c;
+	float treb_c;
 
 	char *audio_source_name;
-	obs_volmeter_t *volmeter;
-	float current_audio_peak;
-	float current_audio_magnitude;
+	struct audio_source_analysis *audio_analysis;
 
 	DARRAY(struct effect_param_data) stored_param_list;
 };
+
+static void shader_filter_release_audio_analysis(struct shader_filter_data *filter);
+static void shader_filter_release_spectrum(struct shader_filter_data *filter);
 
 static unsigned int rand_interval(unsigned int min, unsigned int max)
 {
@@ -337,6 +668,15 @@ static char *load_shader_from_file(const char *file_name) // add input of visite
 
 static void shader_filter_clear_params(struct shader_filter_data *filter)
 {
+	shader_filter_release_spectrum(filter);
+	filter->param_spec = NULL;
+	filter->spectrum_declared = false;
+	if (filter->spec_texture) {
+		obs_enter_graphics();
+		gs_texture_destroy(filter->spec_texture);
+		filter->spec_texture = NULL;
+		obs_leave_graphics();
+	}
 	filter->param_current_time_ms = NULL;
 	filter->param_current_time_sec = NULL;
 	filter->param_current_time_min = NULL;
@@ -362,7 +702,64 @@ static void shader_filter_clear_params(struct shader_filter_data *filter)
 	filter->param_loop_second = NULL;
 	filter->param_local_time = NULL;
 	filter->param_audio_peak = NULL;
+	filter->param_gamepad_available = NULL;
+	filter->param_gamepad_info = NULL;
+	filter->param_gamepad_buttons = NULL;
+	filter->param_gamepad_presses = NULL;
+	filter->param_gamepad_axes = NULL;
+	filter->param_gamepad_axes_c = NULL;
+	filter->param_gamepad_axes_clamped = NULL;
+	filter->param_gamepad_data = NULL;
 	filter->param_audio_magnitude = NULL;
+	filter->param_energy = NULL;
+	filter->param_e_bass = NULL;
+	filter->param_e_lows = NULL;
+	filter->param_e_mids = NULL;
+	filter->param_e_treb = NULL;
+	filter->param_bass = NULL;
+	filter->param_lows = NULL;
+	filter->param_mids = NULL;
+	filter->param_treb = NULL;
+	filter->param_bass_c = NULL;
+	filter->param_lows_c = NULL;
+	filter->param_mids_c = NULL;
+	filter->param_treb_c = NULL;
+	filter->param_t_bass = NULL;
+	filter->param_t_lows = NULL;
+	filter->param_t_mids = NULL;
+	filter->param_t_treb = NULL;
+	filter->param_ef_bass_fast = NULL;
+	filter->param_ef_bass_medium = NULL;
+	filter->param_ef_bass_slow = NULL;
+	filter->param_ef_bass_slug = NULL;
+	filter->param_ef_lows_fast = NULL;
+	filter->param_ef_lows_medium = NULL;
+	filter->param_ef_lows_slow = NULL;
+	filter->param_ef_lows_slug = NULL;
+	filter->param_ef_mids_fast = NULL;
+	filter->param_ef_mids_medium = NULL;
+	filter->param_ef_mids_slow = NULL;
+	filter->param_ef_mids_slug = NULL;
+	filter->param_ef_treb_fast = NULL;
+	filter->param_ef_treb_medium = NULL;
+	filter->param_ef_treb_slow = NULL;
+	filter->param_ef_treb_slug = NULL;
+	filter->param_lf_bass_fast = NULL;
+	filter->param_lf_bass_medium = NULL;
+	filter->param_lf_bass_slow = NULL;
+	filter->param_lf_bass_slug = NULL;
+	filter->param_lf_lows_fast = NULL;
+	filter->param_lf_lows_medium = NULL;
+	filter->param_lf_lows_slow = NULL;
+	filter->param_lf_lows_slug = NULL;
+	filter->param_lf_mids_fast = NULL;
+	filter->param_lf_mids_medium = NULL;
+	filter->param_lf_mids_slow = NULL;
+	filter->param_lf_mids_slug = NULL;
+	filter->param_lf_treb_fast = NULL;
+	filter->param_lf_treb_medium = NULL;
+	filter->param_lf_treb_slow = NULL;
+	filter->param_lf_treb_slug = NULL;
 	filter->param_image = NULL;
 	filter->param_previous_image = NULL;
 	filter->param_image_a = NULL;
@@ -517,6 +914,9 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 
 	if (use_template) {
 		dstr_cat(&effect_text, effect_template_begin);
+		dstr_cat(&effect_text, effect_template_helpers);
+		if (shader_text && strstr(shader_text, "gamepad_"))
+			dstr_cat(&effect_text, effect_template_gamepad);
 	}
 
 	if (shader_text) {
@@ -546,6 +946,7 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 
 	if (filter->effect)
 		gs_effect_destroy(filter->effect);
+	filter->spectrum_declared = sf_shader_append_spectrum(&effect_text);
 	filter->effect = gs_effect_create(effect_text.array, NULL, &errors);
 	obs_leave_graphics();
 
@@ -626,8 +1027,124 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 			filter->param_local_time = param;
 		} else if (strcmp(info.name, "audio_peak") == 0) {
 			filter->param_audio_peak = param;
+		} else if (strcmp(info.name, "gamepad_available") == 0) {
+			filter->param_gamepad_available = param;
+		} else if (strcmp(info.name, "gamepad_info") == 0) {
+			filter->param_gamepad_info = param;
+		} else if (strcmp(info.name, "gamepad_buttons") == 0) {
+			filter->param_gamepad_buttons = param;
+		} else if (strcmp(info.name, "gamepad_presses") == 0) {
+			filter->param_gamepad_presses = param;
+		} else if (strcmp(info.name, "gamepad_axes") == 0) {
+			filter->param_gamepad_axes = param;
+		} else if (strcmp(info.name, "gamepad_axes_c") == 0) {
+			filter->param_gamepad_axes_c = param;
+		} else if (strcmp(info.name, "gamepad_axes_clamped") == 0) {
+			filter->param_gamepad_axes_clamped = param;
+		} else if (strcmp(info.name, "gamepad_data") == 0) {
+			filter->param_gamepad_data = param;
 		} else if (strcmp(info.name, "audio_magnitude") == 0) {
 			filter->param_audio_magnitude = param;
+		} else if (strcmp(info.name, "energy") == 0) {
+			filter->param_energy = param;
+		} else if (strcmp(info.name, "e_bass") == 0) {
+			filter->param_e_bass = param;
+		} else if (strcmp(info.name, "e_lows") == 0) {
+			filter->param_e_lows = param;
+		} else if (strcmp(info.name, "e_mids") == 0) {
+			filter->param_e_mids = param;
+		} else if (strcmp(info.name, "e_treb") == 0) {
+			filter->param_e_treb = param;
+		} else if (strcmp(info.name, "bass") == 0) {
+			filter->param_bass = param;
+		} else if (strcmp(info.name, "lows") == 0) {
+			filter->param_lows = param;
+		} else if (strcmp(info.name, "mids") == 0) {
+			filter->param_mids = param;
+		} else if (strcmp(info.name, "treb") == 0) {
+			filter->param_treb = param;
+		} else if (strcmp(info.name, "bass_c") == 0) {
+			filter->param_bass_c = param;
+		} else if (strcmp(info.name, "lows_c") == 0) {
+			filter->param_lows_c = param;
+		} else if (strcmp(info.name, "mids_c") == 0) {
+			filter->param_mids_c = param;
+		} else if (strcmp(info.name, "treb_c") == 0) {
+			filter->param_treb_c = param;
+		} else if (strcmp(info.name, "t_bass") == 0) {
+			filter->param_t_bass = param;
+		} else if (strcmp(info.name, "spec") == 0 && info.type == GS_SHADER_PARAM_TEXTURE && filter->spectrum_declared) {
+			filter->param_spec = param;
+		} else if (strcmp(info.name, "t_lows") == 0) {
+			filter->param_t_lows = param;
+		} else if (strcmp(info.name, "t_mids") == 0) {
+			filter->param_t_mids = param;
+		} else if (strcmp(info.name, "t_treb") == 0) {
+			filter->param_t_treb = param;
+		} else if (strcmp(info.name, "ef_bass_fast") == 0) {
+			filter->param_ef_bass_fast = param;
+		} else if (strcmp(info.name, "ef_bass_medium") == 0) {
+			filter->param_ef_bass_medium = param;
+		} else if (strcmp(info.name, "ef_bass_slow") == 0) {
+			filter->param_ef_bass_slow = param;
+		} else if (strcmp(info.name, "ef_bass_slug") == 0) {
+			filter->param_ef_bass_slug = param;
+		} else if (strcmp(info.name, "ef_lows_fast") == 0) {
+			filter->param_ef_lows_fast = param;
+		} else if (strcmp(info.name, "ef_lows_medium") == 0) {
+			filter->param_ef_lows_medium = param;
+		} else if (strcmp(info.name, "ef_lows_slow") == 0) {
+			filter->param_ef_lows_slow = param;
+		} else if (strcmp(info.name, "ef_lows_slug") == 0) {
+			filter->param_ef_lows_slug = param;
+		} else if (strcmp(info.name, "ef_mids_fast") == 0) {
+			filter->param_ef_mids_fast = param;
+		} else if (strcmp(info.name, "ef_mids_medium") == 0) {
+			filter->param_ef_mids_medium = param;
+		} else if (strcmp(info.name, "ef_mids_slow") == 0) {
+			filter->param_ef_mids_slow = param;
+		} else if (strcmp(info.name, "ef_mids_slug") == 0) {
+			filter->param_ef_mids_slug = param;
+		} else if (strcmp(info.name, "ef_treb_fast") == 0) {
+			filter->param_ef_treb_fast = param;
+		} else if (strcmp(info.name, "ef_treb_medium") == 0) {
+			filter->param_ef_treb_medium = param;
+		} else if (strcmp(info.name, "ef_treb_slow") == 0) {
+			filter->param_ef_treb_slow = param;
+		} else if (strcmp(info.name, "ef_treb_slug") == 0) {
+			filter->param_ef_treb_slug = param;
+		} else if (strcmp(info.name, "lf_bass_fast") == 0) {
+			filter->param_lf_bass_fast = param;
+		} else if (strcmp(info.name, "lf_bass_medium") == 0) {
+			filter->param_lf_bass_medium = param;
+		} else if (strcmp(info.name, "lf_bass_slow") == 0) {
+			filter->param_lf_bass_slow = param;
+		} else if (strcmp(info.name, "lf_bass_slug") == 0) {
+			filter->param_lf_bass_slug = param;
+		} else if (strcmp(info.name, "lf_lows_fast") == 0) {
+			filter->param_lf_lows_fast = param;
+		} else if (strcmp(info.name, "lf_lows_medium") == 0) {
+			filter->param_lf_lows_medium = param;
+		} else if (strcmp(info.name, "lf_lows_slow") == 0) {
+			filter->param_lf_lows_slow = param;
+		} else if (strcmp(info.name, "lf_lows_slug") == 0) {
+			filter->param_lf_lows_slug = param;
+		} else if (strcmp(info.name, "lf_mids_fast") == 0) {
+			filter->param_lf_mids_fast = param;
+		} else if (strcmp(info.name, "lf_mids_medium") == 0) {
+			filter->param_lf_mids_medium = param;
+		} else if (strcmp(info.name, "lf_mids_slow") == 0) {
+			filter->param_lf_mids_slow = param;
+		} else if (strcmp(info.name, "lf_mids_slug") == 0) {
+			filter->param_lf_mids_slug = param;
+		} else if (strcmp(info.name, "lf_treb_fast") == 0) {
+			filter->param_lf_treb_fast = param;
+		} else if (strcmp(info.name, "lf_treb_medium") == 0) {
+			filter->param_lf_treb_medium = param;
+		} else if (strcmp(info.name, "lf_treb_slow") == 0) {
+			filter->param_lf_treb_slow = param;
+		} else if (strcmp(info.name, "lf_treb_slug") == 0) {
+			filter->param_lf_treb_slug = param;
 		} else if (strcmp(info.name, "ViewProj") == 0) {
 			// Nothing.
 		} else if (strcmp(info.name, "image") == 0) {
@@ -727,6 +1244,24 @@ static void *shader_filter_create(obs_data_t *settings, obs_source_t *source)
 	filter->rand_activation_f = (float)((double)rand_interval(0, 10000) / (double)10000);
 
 	da_init(filter->stored_param_list);
+
+	// Allocate circular buffers for audio timeseries
+	filter->t_bass_buffer = bzalloc(AUDIO_TIMESERIES_BUFFER_WIDTH * sizeof(float));
+	filter->t_lows_buffer = bzalloc(AUDIO_TIMESERIES_BUFFER_WIDTH * sizeof(float));
+	filter->t_mids_buffer = bzalloc(AUDIO_TIMESERIES_BUFFER_WIDTH * sizeof(float));
+	filter->t_treb_buffer = bzalloc(AUDIO_TIMESERIES_BUFFER_WIDTH * sizeof(float));
+
+	// Initialize falloff presets to zero
+	filter->ef_bass_fast = filter->ef_bass_medium = filter->ef_bass_slow = filter->ef_bass_slug = 0.0f;
+	filter->ef_lows_fast = filter->ef_lows_medium = filter->ef_lows_slow = filter->ef_lows_slug = 0.0f;
+	filter->ef_mids_fast = filter->ef_mids_medium = filter->ef_mids_slow = filter->ef_mids_slug = 0.0f;
+	filter->ef_treb_fast = filter->ef_treb_medium = filter->ef_treb_slow = filter->ef_treb_slug = 0.0f;
+
+	filter->lf_bass_fast = filter->lf_bass_medium = filter->lf_bass_slow = filter->lf_bass_slug = 0.0f;
+	filter->lf_lows_fast = filter->lf_lows_medium = filter->lf_lows_slow = filter->lf_lows_slug = 0.0f;
+	filter->lf_mids_fast = filter->lf_mids_medium = filter->lf_mids_slow = filter->lf_mids_slug = 0.0f;
+	filter->lf_treb_fast = filter->lf_treb_medium = filter->lf_treb_slow = filter->lf_treb_slug = 0.0f;
+
 	load_output_effect(filter);
 	obs_source_update(source, settings);
 
@@ -753,13 +1288,30 @@ static void shader_filter_destroy(void *data)
 		gs_texrender_destroy(filter->previous_output_texrender);
 	if (filter->sprite_buffer)
 		gs_vertexbuffer_destroy(filter->sprite_buffer);
+	if (filter->t_bass_render)
+		gs_texrender_destroy(filter->t_bass_render);
+	if (filter->t_lows_render)
+		gs_texrender_destroy(filter->t_lows_render);
+	if (filter->t_mids_render)
+		gs_texrender_destroy(filter->t_mids_render);
+	if (filter->t_treb_render)
+		gs_texrender_destroy(filter->t_treb_render);
+    // ef_/lf_ texrenders removed; falloff presets now uploaded as floats
 	obs_leave_graphics();
 
 	dstr_free(&filter->last_path);
 	da_free(filter->stored_param_list);
 
-	if (filter->volmeter)
-		obs_volmeter_destroy(filter->volmeter);
+	if (filter->t_bass_buffer)
+		bfree(filter->t_bass_buffer);
+	if (filter->t_lows_buffer)
+		bfree(filter->t_lows_buffer);
+	if (filter->t_mids_buffer)
+		bfree(filter->t_mids_buffer);
+	if (filter->t_treb_buffer)
+		bfree(filter->t_treb_buffer);
+
+	shader_filter_release_audio_analysis(filter);
 	if (filter->audio_source_name)
 		bfree(filter->audio_source_name);
 
@@ -2154,36 +2706,579 @@ static const char *shader_filter_texture_file_filter = "Textures (*.bmp *.tga *.
 
 #define MIN_AUDIO_THRESHOLD -60.0f
 
-static float convert_db_to_linear(float db_value)
+static bool shader_text_uses_audio(const char *shader_text)
 {
-	if (db_value <= MIN_AUDIO_THRESHOLD || db_value > 0.0f)
-		return 0.0f;
+	if (!shader_text)
+		return false;
 
-	return fmaxf(0.0f, fminf(1.0f, (db_value - MIN_AUDIO_THRESHOLD) / (-MIN_AUDIO_THRESHOLD)));
+	// Audio identifiers to search for - these are the actual variable/function names
+	const char *audio_identifiers[] = {
+		"bass", "lows", "mids", "treb",
+		"bass_c", "lows_c", "mids_c", "treb_c",
+		"audio_peak", "audio_magnitude",
+		"energy", "e_bass", "e_lows", "e_mids", "e_treb",
+		"acc(", "ts(", "cu_bass(", "cu_lows(", "cu_mids(", "cu_treb(",
+		"t_bass", "t_lows", "t_mids", "t_treb",
+		"expfoff(", "linfoff(",
+		"ef_bass_fast", "ef_bass_medium", "ef_bass_slow", "ef_bass_slug",
+		"ef_lows_fast", "ef_lows_medium", "ef_lows_slow", "ef_lows_slug",
+		"ef_mids_fast", "ef_mids_medium", "ef_mids_slow", "ef_mids_slug",
+		"ef_treb_fast", "ef_treb_medium", "ef_treb_slow", "ef_treb_slug",
+		"lf_bass_fast", "lf_bass_medium", "lf_bass_slow", "lf_bass_slug",
+		"lf_lows_fast", "lf_lows_medium", "lf_lows_slow", "lf_lows_slug",
+		"lf_mids_fast", "lf_mids_medium", "lf_mids_slow", "lf_mids_slug",
+		"lf_treb_fast", "lf_treb_medium", "lf_treb_slow", "lf_treb_slug"
+	};
+
+	for (size_t i = 0; i < sizeof(audio_identifiers) / sizeof(audio_identifiers[0]); i++) {
+		if (strstr(shader_text, audio_identifiers[i]) != NULL)
+			return true;
+	}
+
+	return false;
 }
 
-static void shader_filter_audio_callback(void *data, const float magnitude[MAX_AUDIO_CHANNELS],
-					 const float peak[MAX_AUDIO_CHANNELS], const float input_peak[MAX_AUDIO_CHANNELS])
+static bool uses_audio_bands(struct shader_filter_data *filter)
 {
-	UNUSED_PARAMETER(input_peak);
-	struct shader_filter_data *filter = (struct shader_filter_data *)data;
+	if (!filter)
+		return false;
 
-	float max_peak = MIN_AUDIO_THRESHOLD;
-	for (int i = 0; i < MAX_AUDIO_CHANNELS; i++) {
-		if (peak[i] > max_peak && peak[i] != 0.0f) {
-			max_peak = peak[i];
+	// Get shader text from settings
+	obs_data_t *settings = obs_source_get_settings(filter->context);
+	const char *shader_text = obs_data_get_string(settings, "shader_text");
+	char *loaded_text = NULL;
+
+	if (!shader_text || !strlen(shader_text)) {
+		// If no text in settings, try loading from file
+		const char *file_name = obs_data_get_string(settings, "shader_file_name");
+		if (file_name && strlen(file_name)) {
+			loaded_text = load_shader_from_file(file_name);
+			shader_text = loaded_text;
 		}
 	}
 
-	float max_magnitude = MIN_AUDIO_THRESHOLD;
-	for (int i = 0; i < MAX_AUDIO_CHANNELS; i++) {
-		if (magnitude[i] > max_magnitude && magnitude[i] != 0.0f) {
-			max_magnitude = magnitude[i];
+	const bool result = shader_text_uses_audio(shader_text);
+
+	if (loaded_text)
+		bfree(loaded_text);
+	obs_data_release(settings);
+
+	return result;
+}
+
+static inline float wrap_audio_band_counter(float value)
+{
+	return value >= AUDIO_BAND_COUNTER_WRAP ? fmodf(value, AUDIO_BAND_COUNTER_WRAP) : value;
+}
+
+static inline float shader_filter_update_exp_falloff(float previous, float current, float tail_seconds, float delta_time)
+{
+	// Reach 1% of the starting level after tail_seconds, independently of FPS.
+	return fmaxf(previous * expf(-4.605170186f * delta_time / tail_seconds), current);
+}
+
+static inline float shader_filter_update_lin_falloff(float previous, float current, float tail_seconds, float delta_time)
+{
+	// Constant slope in the shader's normalized level: 1 -> 0 in tail_seconds.
+	return fmaxf(previous - delta_time / tail_seconds, current);
+}
+
+/* Adjacent outputs from these one-pole low-pass filters are subtracted to
+ * produce the four inexpensive time-domain band-pass signals. */
+static const float audio_crossover_frequencies[AUDIO_CROSSOVER_COUNT] = {30.0f, 120.0f, 500.0f, 3000.0f, 13000.0f};
+
+/* Tail zero is the unsmoothed base band. The longest preset has the same
+ * approximate duration as the 131072-sample spectrum window at 48 kHz. */
+static const float audio_falloff_seconds[AUDIO_FALLOFF_SLUG + 1] = {0.12f, 0.4f, 1.0f, 131072.0f / 48000.0f};
+
+static uint32_t shader_filter_audio_sample_rate(void)
+{
+	audio_t *audio = obs_get_audio();
+	const uint32_t sample_rate = audio ? audio_output_get_sample_rate(audio) : 0;
+	return sample_rate ? sample_rate : 48000;
+}
+
+static size_t shader_filter_audio_channel_count(void)
+{
+	audio_t *audio = obs_get_audio();
+	const size_t channels = audio ? audio_output_get_channels(audio) : 0;
+	return channels ? (channels < MAX_AUDIO_CHANNELS ? channels : MAX_AUDIO_CHANNELS) : MAX_AUDIO_CHANNELS;
+}
+
+static void shader_filter_configure_audio_crossover(struct audio_source_analysis *analysis, uint32_t sample_rate)
+{
+	if (analysis->sample_rate == sample_rate)
+		return;
+
+	const float nyquist_guard = (float)sample_rate * 0.45f;
+	for (size_t i = 0; i < AUDIO_CROSSOVER_COUNT; i++) {
+		const float cutoff = fminf(audio_crossover_frequencies[i], nyquist_guard);
+		analysis->lowpass_alpha[i] = 1.0f - expf(-2.0f * 3.14159265358979323846f * cutoff / (float)sample_rate);
+	}
+	// Approximate hearing sensitivity with the same A curve as the spectrum,
+	// evaluated at each band's geometric center. No arbitrary bass/treble boost.
+	for (size_t band = 0; band < AUDIO_BAND_COUNT; ++band) {
+		const float low = fminf(audio_crossover_frequencies[band], nyquist_guard);
+		const float high = fminf(audio_crossover_frequencies[band + 1], nyquist_guard);
+		analysis->band_weights[band] = low < high ? (float)sf_spectrum_a_weight(sqrt((double)low * high)) : 0.0f;
+	}
+
+	analysis->sample_rate = sample_rate;
+	analysis->capture_ns = 0;
+	memset(&analysis->energy_window, 0, sizeof(analysis->energy_window));
+	memset(analysis->lowpass_state, 0, sizeof(analysis->lowpass_state));
+	memset(analysis->bands, 0, sizeof(analysis->bands));
+	memset(analysis->exp_falloff, 0, sizeof(analysis->exp_falloff));
+	memset(analysis->lin_falloff, 0, sizeof(analysis->lin_falloff));
+}
+
+static float shader_filter_audio_level(float amplitude)
+{
+	if (amplitude <= 0.001f)
+		return 0.0f;
+
+	const float db = 20.0f * log10f(amplitude);
+	return fmaxf(0.0f, fminf(1.0f, (db - MIN_AUDIO_THRESHOLD) / -MIN_AUDIO_THRESHOLD));
+}
+
+static void shader_filter_update_shared_audio_derivatives(struct audio_source_analysis *analysis, float delta_time,
+							float falloff_delta_time)
+{
+	for (size_t band = 0; band < AUDIO_BAND_COUNT; band++) {
+		analysis->cumulative[band] =
+			wrap_audio_band_counter(analysis->cumulative[band] + analysis->bands[band] * delta_time * 100.0f);
+
+		for (size_t speed = 0; speed <= AUDIO_FALLOFF_SLUG; speed++) {
+			analysis->exp_falloff[band][speed] =
+				shader_filter_update_exp_falloff(analysis->exp_falloff[band][speed], analysis->bands[band],
+								 audio_falloff_seconds[speed], falloff_delta_time);
+			analysis->lin_falloff[band][speed] =
+				shader_filter_update_lin_falloff(analysis->lin_falloff[band][speed], analysis->bands[band],
+								 audio_falloff_seconds[speed], falloff_delta_time);
+		}
+
+		const float history_decay = expf(-delta_time / 0.15f);
+		analysis->history_smooth[band] =
+			analysis->history_smooth[band] * history_decay + analysis->bands[band] * (1.0f - history_decay);
+		analysis->history[band][analysis->history_write_pos] = analysis->history_smooth[band];
+	}
+
+	analysis->history_write_pos = (analysis->history_write_pos + 1) % AUDIO_TIMESERIES_BUFFER_WIDTH;
+}
+
+static void shader_filter_audio_analysis_callback(void *data, obs_source_t *source, const struct audio_data *audio, bool muted)
+{
+	UNUSED_PARAMETER(source);
+	struct audio_source_analysis *analysis = data;
+	if (!analysis || !audio || !audio->frames)
+		return;
+
+	pthread_mutex_lock(&analysis->mutex);
+	const uint32_t sample_rate = shader_filter_audio_sample_rate();
+	shader_filter_configure_audio_crossover(analysis, sample_rate);
+	const float delta_time = (float)audio->frames / (float)sample_rate;
+	const double capture_seconds = (double)audio->frames / (double)sample_rate;
+	const uint64_t capture_ns = os_gettime_ns();
+	float falloff_delta_time = delta_time;
+	if (analysis->capture_ns && capture_ns > analysis->capture_ns) {
+		const float gap = (float)((double)(capture_ns - analysis->capture_ns) * 1e-9);
+		if (gap > fmaxf(0.05f, 2.0f * analysis->capture_seconds)) {
+			falloff_delta_time = fmaxf(delta_time, gap);
+			memset(analysis->lowpass_state, 0, sizeof(analysis->lowpass_state));
+		}
+	}
+	analysis->capture_ns = capture_ns;
+	analysis->capture_seconds = delta_time;
+	double power[SF_ENERGY_CHANNELS] = {0.0};
+	if (analysis->spectrum) {
+		const float *samples[MAX_AUDIO_CHANNELS] = {0};
+		const size_t channels = shader_filter_audio_channel_count();
+		for (size_t channel = 0; channel < channels; ++channel)
+			samples[channel] = (const float *)audio->data[channel];
+		sf_spectrum_push(analysis->spectrum, samples, channels, audio->frames, sample_rate,
+				 muted || !audio->data[0], audio->timestamp, capture_ns);
+	}
+
+	if (muted || !audio->data[0]) {
+		analysis->audio_peak = 0.0f;
+		analysis->audio_magnitude = 0.0f;
+		memset(analysis->bands, 0, sizeof(analysis->bands));
+		memset(analysis->lowpass_state, 0, sizeof(analysis->lowpass_state));
+		sf_audio_energy_capture(&analysis->energy_window, power, capture_seconds, audio->timestamp, capture_ns);
+		shader_filter_update_shared_audio_derivatives(analysis, delta_time, falloff_delta_time);
+		pthread_mutex_unlock(&analysis->mutex);
+		return;
+	}
+
+	size_t channels[MAX_AUDIO_CHANNELS];
+	size_t channel_count = 0;
+	const size_t available_channels = shader_filter_audio_channel_count();
+	for (size_t channel = 0; channel < available_channels; channel++) {
+		if (audio->data[channel])
+			channels[channel_count++] = channel;
+	}
+
+	double full_energy = 0.0;
+	double band_energy[AUDIO_BAND_COUNT] = {0.0};
+	float peak = 0.0f;
+	for (size_t frame = 0; frame < audio->frames; frame++) {
+		for (size_t channel_index = 0; channel_index < channel_count; channel_index++) {
+			const size_t channel = channels[channel_index];
+			const float input = ((const float *)audio->data[channel])[frame];
+			const float sample = isfinite(input) ? input : 0.0f;
+			peak = fmaxf(peak, fabsf(sample));
+			full_energy += (double)sample * (double)sample;
+
+			float lowpass[AUDIO_CROSSOVER_COUNT];
+			for (size_t crossover = 0; crossover < AUDIO_CROSSOVER_COUNT; crossover++) {
+				float *state = &analysis->lowpass_state[channel][crossover];
+				*state += analysis->lowpass_alpha[crossover] * (sample - *state);
+				lowpass[crossover] = *state;
+			}
+
+			const float band_samples[AUDIO_BAND_COUNT] = {
+				lowpass[1] - lowpass[0],
+				lowpass[2] - lowpass[1],
+				lowpass[3] - lowpass[2],
+				lowpass[4] - lowpass[3],
+			};
+			for (size_t band = 0; band < AUDIO_BAND_COUNT; band++)
+				band_energy[band] += (double)band_samples[band] * (double)band_samples[band];
 		}
 	}
 
-	filter->current_audio_peak = convert_db_to_linear(max_peak);
-	filter->current_audio_magnitude = convert_db_to_linear(max_magnitude);
+	const size_t sample_count = audio->frames * channel_count;
+	if (sample_count) {
+		power[0] = full_energy / (double)sample_count;
+		for (size_t band = 0; band < AUDIO_BAND_COUNT; ++band)
+			power[band + 1] = band_energy[band] / (double)sample_count;
+		analysis->audio_peak = shader_filter_audio_level(peak);
+		analysis->audio_magnitude = shader_filter_audio_level(sqrtf((float)(full_energy / (double)sample_count)));
+
+		for (size_t band = 0; band < AUDIO_BAND_COUNT; band++) {
+			const float rms = sqrtf((float)(band_energy[band] / (double)sample_count));
+			analysis->bands[band] = shader_filter_audio_level(rms * analysis->band_weights[band]);
+		}
+	} else {
+		analysis->audio_peak = 0.0f;
+		analysis->audio_magnitude = 0.0f;
+		memset(analysis->bands, 0, sizeof(analysis->bands));
+	}
+
+	sf_audio_energy_capture(&analysis->energy_window, power, capture_seconds, audio->timestamp, capture_ns);
+	shader_filter_update_shared_audio_derivatives(analysis, delta_time, falloff_delta_time);
+	pthread_mutex_unlock(&analysis->mutex);
+}
+
+static struct audio_source_analysis *shader_filter_acquire_audio_analysis(obs_source_t *source)
+{
+	if (!source)
+		return NULL;
+
+	pthread_mutex_lock(&audio_analyses_mutex);
+	for (struct audio_source_analysis *analysis = audio_analyses; analysis; analysis = analysis->next) {
+		obs_source_t *analysis_source = obs_weak_source_get_source(analysis->source);
+		const bool matches = analysis_source == source;
+		if (analysis_source)
+			obs_source_release(analysis_source);
+		if (matches) {
+			analysis->users++;
+			pthread_mutex_unlock(&audio_analyses_mutex);
+			return analysis;
+		}
+	}
+
+	struct audio_source_analysis *analysis = bzalloc(sizeof(*analysis));
+	if (pthread_mutex_init(&analysis->mutex, NULL) != 0) {
+		bfree(analysis);
+		pthread_mutex_unlock(&audio_analyses_mutex);
+		return NULL;
+	}
+
+	analysis->source = obs_source_get_weak_source(source);
+	analysis->users = 1;
+	analysis->next = audio_analyses;
+	audio_analyses = analysis;
+	obs_source_add_audio_capture_callback(source, shader_filter_audio_analysis_callback, analysis);
+	pthread_mutex_unlock(&audio_analyses_mutex);
+	return analysis;
+}
+
+static bool shader_filter_audio_analysis_matches(struct shader_filter_data *filter, obs_source_t *source)
+{
+	if (!filter->audio_analysis)
+		return false;
+
+	obs_source_t *analysis_source = obs_weak_source_get_source(filter->audio_analysis->source);
+	const bool matches = analysis_source == source;
+	if (analysis_source)
+		obs_source_release(analysis_source);
+	return matches;
+}
+
+static void shader_filter_release_spectrum(struct shader_filter_data *filter)
+{
+	if (filter->spectrum_registered && filter->audio_analysis) {
+		struct audio_source_analysis *analysis = filter->audio_analysis;
+		pthread_mutex_lock(&analysis->mutex);
+		if (--analysis->spectrum_users == 0) {
+			sf_spectrum_destroy(analysis->spectrum);
+			analysis->spectrum = NULL;
+		}
+		pthread_mutex_unlock(&analysis->mutex);
+	}
+	filter->spectrum_registered = false;
+	memset(filter->spec_values, 0, sizeof(filter->spec_values));
+	filter->spec_revision = 0;
+	filter->spec_uploaded_revision = UINT64_MAX;
+}
+
+static void shader_filter_sync_spectrum(struct shader_filter_data *filter)
+{
+	if (!filter->param_spec || !filter->audio_analysis) {
+		shader_filter_release_spectrum(filter);
+		return;
+	}
+	if (filter->spectrum_registered)
+		return;
+	struct audio_source_analysis *analysis = filter->audio_analysis;
+	pthread_mutex_lock(&analysis->mutex);
+	if (!analysis->spectrum)
+		analysis->spectrum = sf_spectrum_create(shader_filter_audio_sample_rate(), shader_filter_audio_channel_count());
+	if (analysis->spectrum) {
+		++analysis->spectrum_users;
+		filter->spectrum_registered = true;
+	} else {
+		blog(LOG_WARNING, "[obs-shaderfilter] Unable to initialize spectrum FFT worker");
+	}
+	pthread_mutex_unlock(&analysis->mutex);
+}
+
+static void shader_filter_release_audio_analysis(struct shader_filter_data *filter)
+{
+	if (!filter || !filter->audio_analysis)
+		return;
+
+	shader_filter_release_spectrum(filter);
+	struct audio_source_analysis *analysis = filter->audio_analysis;
+	filter->audio_analysis = NULL;
+
+	pthread_mutex_lock(&audio_analyses_mutex);
+	if (--analysis->users) {
+		pthread_mutex_unlock(&audio_analyses_mutex);
+		return;
+	}
+
+	struct audio_source_analysis **link = &audio_analyses;
+	while (*link && *link != analysis)
+		link = &(*link)->next;
+	if (*link)
+		*link = analysis->next;
+
+	obs_source_t *source = obs_weak_source_get_source(analysis->source);
+	if (source) {
+		obs_source_remove_audio_capture_callback(source, shader_filter_audio_analysis_callback, analysis);
+		obs_source_release(source);
+	}
+	pthread_mutex_unlock(&audio_analyses_mutex);
+
+	obs_weak_source_release(analysis->source);
+	pthread_mutex_destroy(&analysis->mutex);
+	bfree(analysis);
+}
+
+static void shader_filter_attach_audio_analysis(struct shader_filter_data *filter, obs_source_t *source)
+{
+	if ((!uses_audio_bands(filter) && !filter->param_spec) || !source) {
+		shader_filter_release_audio_analysis(filter);
+		return;
+	}
+
+	if (shader_filter_audio_analysis_matches(filter, source))
+		return;
+
+	shader_filter_release_audio_analysis(filter);
+	filter->audio_analysis = shader_filter_acquire_audio_analysis(source);
+}
+
+static void shader_filter_copy_audio_analysis(struct shader_filter_data *filter)
+{
+	struct audio_source_analysis *analysis = filter->audio_analysis;
+	if (!analysis)
+		return;
+
+	float *history_buffers[AUDIO_BAND_COUNT] = {
+		filter->t_bass_buffer,
+		filter->t_lows_buffer,
+		filter->t_mids_buffer,
+		filter->t_treb_buffer,
+	};
+	float *exp_falloff[AUDIO_BAND_COUNT][AUDIO_FALLOFF_SLUG + 1] = {
+		{&filter->ef_bass_fast, &filter->ef_bass_medium, &filter->ef_bass_slow, &filter->ef_bass_slug},
+		{&filter->ef_lows_fast, &filter->ef_lows_medium, &filter->ef_lows_slow, &filter->ef_lows_slug},
+		{&filter->ef_mids_fast, &filter->ef_mids_medium, &filter->ef_mids_slow, &filter->ef_mids_slug},
+		{&filter->ef_treb_fast, &filter->ef_treb_medium, &filter->ef_treb_slow, &filter->ef_treb_slug},
+	};
+	float *lin_falloff[AUDIO_BAND_COUNT][AUDIO_FALLOFF_SLUG + 1] = {
+		{&filter->lf_bass_fast, &filter->lf_bass_medium, &filter->lf_bass_slow, &filter->lf_bass_slug},
+		{&filter->lf_lows_fast, &filter->lf_lows_medium, &filter->lf_lows_slow, &filter->lf_lows_slug},
+		{&filter->lf_mids_fast, &filter->lf_mids_medium, &filter->lf_mids_slow, &filter->lf_mids_slug},
+		{&filter->lf_treb_fast, &filter->lf_treb_medium, &filter->lf_treb_slow, &filter->lf_treb_slug},
+	};
+
+	pthread_mutex_lock(&analysis->mutex);
+	const uint64_t now = os_gettime_ns();
+	const float age = analysis->capture_ns && now > analysis->capture_ns
+				  ? (float)((double)(now - analysis->capture_ns) * 1e-9)
+				  : 0.0f;
+	const bool stale = age > fmaxf(0.05f, 2.0f * analysis->capture_seconds);
+	filter->audio_peak = stale ? 0.0f : analysis->audio_peak;
+	filter->audio_magnitude = stale ? 0.0f : analysis->audio_magnitude;
+	double power[SF_ENERGY_CHANNELS];
+	sf_audio_energy_read(&analysis->energy_window, now, power);
+	filter->energy = shader_filter_audio_level((float)sqrt(power[0]));
+	float *band_energies[AUDIO_BAND_COUNT] = {&filter->e_bass, &filter->e_lows, &filter->e_mids, &filter->e_treb};
+	for (size_t band = 0; band < AUDIO_BAND_COUNT; ++band)
+		*band_energies[band] = shader_filter_audio_level((float)sqrt(power[band + 1]) * analysis->band_weights[band]);
+	filter->bass = stale ? 0.0f : analysis->bands[AUDIO_BAND_BASS];
+	filter->lows = stale ? 0.0f : analysis->bands[AUDIO_BAND_LOWS];
+	filter->mids = stale ? 0.0f : analysis->bands[AUDIO_BAND_MIDS];
+	filter->treb = stale ? 0.0f : analysis->bands[AUDIO_BAND_TREB];
+	filter->bass_c = analysis->cumulative[AUDIO_BAND_BASS];
+	filter->lows_c = analysis->cumulative[AUDIO_BAND_LOWS];
+	filter->mids_c = analysis->cumulative[AUDIO_BAND_MIDS];
+	filter->treb_c = analysis->cumulative[AUDIO_BAND_TREB];
+
+	for (size_t band = 0; band < AUDIO_BAND_COUNT; band++) {
+		for (size_t speed = 0; speed <= AUDIO_FALLOFF_SLUG; speed++) {
+			// Project from the last capture without modifying shared state, so
+			// stopped sources decay and multiple video consumers cannot double-step.
+			*exp_falloff[band][speed] =
+				stale ? shader_filter_update_exp_falloff(analysis->exp_falloff[band][speed], 0.0f,
+									audio_falloff_seconds[speed], age)
+				      : analysis->exp_falloff[band][speed];
+			*lin_falloff[band][speed] =
+				stale ? shader_filter_update_lin_falloff(analysis->lin_falloff[band][speed], 0.0f,
+									audio_falloff_seconds[speed], age)
+				      : analysis->lin_falloff[band][speed];
+		}
+		for (size_t i = 0; i < AUDIO_TIMESERIES_BUFFER_WIDTH; i++) {
+			const size_t source_index = (analysis->history_write_pos + i) % AUDIO_TIMESERIES_BUFFER_WIDTH;
+			history_buffers[band][i] = analysis->history[band][source_index];
+		}
+	}
+	pthread_mutex_unlock(&analysis->mutex);
+}
+
+static void shader_filter_clear_audio_snapshot(struct shader_filter_data *filter)
+{
+	filter->audio_peak = 0.0f;
+	filter->audio_magnitude = 0.0f;
+	memset(filter->spec_values, 0, sizeof(filter->spec_values));
+	filter->spec_revision = 0;
+	filter->energy = filter->e_bass = filter->e_lows = filter->e_mids = filter->e_treb = 0.0f;
+	filter->bass = 0.0f;
+	filter->lows = 0.0f;
+	filter->mids = 0.0f;
+	filter->treb = 0.0f;
+	filter->bass_c = 0.0f;
+	filter->lows_c = 0.0f;
+	filter->mids_c = 0.0f;
+	filter->treb_c = 0.0f;
+
+	filter->ef_bass_fast = filter->ef_bass_medium = filter->ef_bass_slow = filter->ef_bass_slug = 0.0f;
+	filter->ef_lows_fast = filter->ef_lows_medium = filter->ef_lows_slow = filter->ef_lows_slug = 0.0f;
+	filter->ef_mids_fast = filter->ef_mids_medium = filter->ef_mids_slow = filter->ef_mids_slug = 0.0f;
+	filter->ef_treb_fast = filter->ef_treb_medium = filter->ef_treb_slow = filter->ef_treb_slug = 0.0f;
+	filter->lf_bass_fast = filter->lf_bass_medium = filter->lf_bass_slow = filter->lf_bass_slug = 0.0f;
+	filter->lf_lows_fast = filter->lf_lows_medium = filter->lf_lows_slow = filter->lf_lows_slug = 0.0f;
+	filter->lf_mids_fast = filter->lf_mids_medium = filter->lf_mids_slow = filter->lf_mids_slug = 0.0f;
+	filter->lf_treb_fast = filter->lf_treb_medium = filter->lf_treb_slow = filter->lf_treb_slug = 0.0f;
+
+	memset(filter->t_bass_buffer, 0, AUDIO_TIMESERIES_BUFFER_WIDTH * sizeof(float));
+	memset(filter->t_lows_buffer, 0, AUDIO_TIMESERIES_BUFFER_WIDTH * sizeof(float));
+	memset(filter->t_mids_buffer, 0, AUDIO_TIMESERIES_BUFFER_WIDTH * sizeof(float));
+	memset(filter->t_treb_buffer, 0, AUDIO_TIMESERIES_BUFFER_WIDTH * sizeof(float));
+}
+
+static void shader_filter_render_audio_timeseries_textures(struct shader_filter_data *filter)
+{
+	if (!filter || !filter->t_bass_buffer)
+		return;
+
+	// Create textures if needed
+	if (!filter->t_bass_render)
+		filter->t_bass_render = gs_texrender_create(GS_R32F, GS_ZS_NONE);
+	if (!filter->t_lows_render)
+		filter->t_lows_render = gs_texrender_create(GS_R32F, GS_ZS_NONE);
+	if (!filter->t_mids_render)
+		filter->t_mids_render = gs_texrender_create(GS_R32F, GS_ZS_NONE);
+	if (!filter->t_treb_render)
+		filter->t_treb_render = gs_texrender_create(GS_R32F, GS_ZS_NONE);
+
+	// Ensure textures are created with the right dimensions
+	gs_texture_t *tex;
+
+	tex = gs_texrender_get_texture(filter->t_bass_render);
+	if (!tex || gs_texture_get_width(tex) != AUDIO_TIMESERIES_BUFFER_WIDTH ||
+		gs_texture_get_height(tex) != AUDIO_TIMESERIES_BUFFER_HEIGHT) {
+		gs_texrender_destroy(filter->t_bass_render);
+		filter->t_bass_render = gs_texrender_create(GS_R32F, GS_ZS_NONE);
+		if (gs_texrender_begin(filter->t_bass_render, AUDIO_TIMESERIES_BUFFER_WIDTH, AUDIO_TIMESERIES_BUFFER_HEIGHT)) {
+			gs_texrender_end(filter->t_bass_render);
+		}
+	}
+
+	tex = gs_texrender_get_texture(filter->t_lows_render);
+	if (!tex || gs_texture_get_width(tex) != AUDIO_TIMESERIES_BUFFER_WIDTH ||
+		gs_texture_get_height(tex) != AUDIO_TIMESERIES_BUFFER_HEIGHT) {
+		gs_texrender_destroy(filter->t_lows_render);
+		filter->t_lows_render = gs_texrender_create(GS_R32F, GS_ZS_NONE);
+		if (gs_texrender_begin(filter->t_lows_render, AUDIO_TIMESERIES_BUFFER_WIDTH, AUDIO_TIMESERIES_BUFFER_HEIGHT)) {
+			gs_texrender_end(filter->t_lows_render);
+		}
+	}
+
+	tex = gs_texrender_get_texture(filter->t_mids_render);
+	if (!tex || gs_texture_get_width(tex) != AUDIO_TIMESERIES_BUFFER_WIDTH ||
+		gs_texture_get_height(tex) != AUDIO_TIMESERIES_BUFFER_HEIGHT) {
+		gs_texrender_destroy(filter->t_mids_render);
+		filter->t_mids_render = gs_texrender_create(GS_R32F, GS_ZS_NONE);
+		if (gs_texrender_begin(filter->t_mids_render, AUDIO_TIMESERIES_BUFFER_WIDTH, AUDIO_TIMESERIES_BUFFER_HEIGHT)) {
+			gs_texrender_end(filter->t_mids_render);
+		}
+	}
+
+	tex = gs_texrender_get_texture(filter->t_treb_render);
+	if (!tex || gs_texture_get_width(tex) != AUDIO_TIMESERIES_BUFFER_WIDTH ||
+		gs_texture_get_height(tex) != AUDIO_TIMESERIES_BUFFER_HEIGHT) {
+		gs_texrender_destroy(filter->t_treb_render);
+		filter->t_treb_render = gs_texrender_create(GS_R32F, GS_ZS_NONE);
+		if (gs_texrender_begin(filter->t_treb_render, AUDIO_TIMESERIES_BUFFER_WIDTH, AUDIO_TIMESERIES_BUFFER_HEIGHT)) {
+			gs_texrender_end(filter->t_treb_render);
+		}
+	}
+
+	// Update texture data by uploading from buffers
+	tex = gs_texrender_get_texture(filter->t_bass_render);
+	if (tex)
+		gs_texture_set_image(tex, (const uint8_t *)filter->t_bass_buffer,
+							AUDIO_TIMESERIES_BUFFER_WIDTH * sizeof(float), false);
+
+	tex = gs_texrender_get_texture(filter->t_lows_render);
+	if (tex)
+		gs_texture_set_image(tex, (const uint8_t *)filter->t_lows_buffer,
+							AUDIO_TIMESERIES_BUFFER_WIDTH * sizeof(float), false);
+
+	tex = gs_texrender_get_texture(filter->t_mids_render);
+	if (tex)
+		gs_texture_set_image(tex, (const uint8_t *)filter->t_mids_buffer,
+							AUDIO_TIMESERIES_BUFFER_WIDTH * sizeof(float), false);
+
+	tex = gs_texrender_get_texture(filter->t_treb_render);
+	if (tex)
+		gs_texture_set_image(tex, (const uint8_t *)filter->t_treb_buffer,
+							AUDIO_TIMESERIES_BUFFER_WIDTH * sizeof(float), false);
 }
 
 static bool shader_filter_enum_audio_sources(void *data, obs_source_t *source)
@@ -2197,6 +3292,11 @@ static bool shader_filter_enum_audio_sources(void *data, obs_source_t *source)
 	}
 
 	return true;
+}
+
+static bool uses_audio(struct shader_filter_data *filter)
+{
+	return filter->param_spec || filter->param_audio_magnitude || filter->param_audio_peak || uses_audio_bands(filter);
 }
 
 static obs_properties_t *shader_filter_properties(void *data)
@@ -2252,7 +3352,7 @@ static obs_properties_t *shader_filter_properties(void *data)
 	obs_properties_add_button(props, "reload_effect", obs_module_text("ShaderFilter.ReloadEffect"),
 				  shader_filter_reload_effect_clicked);
 
-	if (filter && (filter->param_audio_magnitude || filter->param_audio_peak)) {
+	if (filter && (uses_audio(filter))) {
 		obs_property_t *audio_source = obs_properties_add_list(props, "audio_source", "Audio source", OBS_COMBO_TYPE_LIST,
 								       OBS_COMBO_FORMAT_STRING);
 		obs_property_list_add_string(audio_source, "None", "");
@@ -2503,21 +3603,16 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 		obs_source_update_properties(filter->context);
 	}
 
-	if (filter->param_audio_magnitude || filter->param_audio_peak) {
+	if (uses_audio(filter)) {
 		const char *audio_source_name = obs_data_get_string(settings, "audio_source");
-		if (!filter->audio_source_name || strcmp(filter->audio_source_name, audio_source_name) != 0) {
+		if (!filter->audio_source_name || strcmp(filter->audio_source_name, audio_source_name) != 0 ||
+		    !filter->audio_analysis) {
 			obs_source_t *audio_source = strlen(audio_source_name) > 0 ? obs_get_source_by_name(audio_source_name)
 										   : NULL;
 			if (audio_source && ((obs_source_get_output_flags(audio_source) & OBS_SOURCE_AUDIO) == 0)) {
 				obs_source_release(audio_source);
 				audio_source = NULL;
 			}
-			if (audio_source) {
-				if (filter->audio_source_name)
-					bfree(filter->audio_source_name);
-				filter->audio_source_name = bstrdup(audio_source_name);
-			}
-
 			if (!audio_source) {
 				audio_source = obs_source_get_ref(obs_filter_get_parent(filter->context));
 				if (audio_source && ((obs_source_get_output_flags(audio_source) & OBS_SOURCE_AUDIO) == 0)) {
@@ -2526,17 +3621,13 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 				}
 			}
 			if (audio_source) {
-				if (!filter->volmeter) {
-					filter->volmeter = obs_volmeter_create(OBS_FADER_LOG);
-					obs_volmeter_add_callback(filter->volmeter, shader_filter_audio_callback, filter);
-				}
-				obs_volmeter_attach_source(filter->volmeter, audio_source);
+				if (filter->audio_source_name)
+					bfree(filter->audio_source_name);
+				filter->audio_source_name = bstrdup(audio_source_name);
+				shader_filter_attach_audio_analysis(filter, audio_source);
 				obs_source_release(audio_source);
 			} else {
-				if (filter->volmeter) {
-					obs_volmeter_destroy(filter->volmeter);
-					filter->volmeter = NULL;
-				}
+				shader_filter_release_audio_analysis(filter);
 				if (filter->audio_source_name) {
 					bfree(filter->audio_source_name);
 					filter->audio_source_name = NULL;
@@ -2544,15 +3635,14 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 			}
 		}
 	} else {
-		if (filter->volmeter) {
-			obs_volmeter_destroy(filter->volmeter);
-			filter->volmeter = NULL;
-		}
+		shader_filter_release_audio_analysis(filter);
 		if (filter->audio_source_name) {
 			bfree(filter->audio_source_name);
 			filter->audio_source_name = NULL;
 		}
 	}
+
+	shader_filter_sync_spectrum(filter);
 
 	size_t param_count = filter->stored_param_list.num;
 	for (size_t param_index = 0; param_index < param_count; param_index++) {
@@ -2825,12 +3915,10 @@ static void shader_filter_tick(void *data, float seconds)
 	// undecided between this and "rand_float(1);"
 	filter->rand_f = (float)((double)rand_interval(0, 10000) / (double)10000);
 
-	if (filter->volmeter) {
-		filter->audio_peak = filter->current_audio_peak;
-		filter->audio_magnitude = filter->current_audio_magnitude;
+	if (filter->audio_analysis) {
+		shader_filter_copy_audio_analysis(filter);
 	} else {
-		filter->audio_peak = 0.0f;
-		filter->audio_magnitude = 0.0f;
+		shader_filter_clear_audio_snapshot(filter);
 	}
 
 	filter->output_rendered = false;
@@ -2936,6 +4024,68 @@ static void draw_output(struct shader_filter_data *filter)
 
 void shader_filter_set_effect_params(struct shader_filter_data *filter)
 {
+	if (filter->param_spec) {
+		// Read at draw time so an FFT completed after video_tick is visible in
+		// this frame, without another frame of snapshot delay.
+		struct audio_source_analysis *analysis = filter->audio_analysis;
+		if (analysis)
+			pthread_mutex_lock(&analysis->mutex);
+		filter->spec_revision = sf_spectrum_read(analysis ? analysis->spectrum : NULL, filter->spec_values, os_gettime_ns());
+		if (analysis)
+			pthread_mutex_unlock(&analysis->mutex);
+		if (!filter->spec_texture) {
+			const uint8_t *pixels = (const uint8_t *)filter->spec_values;
+			filter->spec_texture = gs_texture_create(SF_SPECTRUM_BANDS, SF_SPECTRUM_ROWS, GS_R32F, 1, &pixels, GS_DYNAMIC);
+			filter->spec_uploaded_revision = filter->spec_revision;
+		} else if (filter->spec_uploaded_revision != filter->spec_revision) {
+			gs_texture_set_image(filter->spec_texture, (const uint8_t *)filter->spec_values,
+					     SF_SPECTRUM_BANDS * sizeof(float), false);
+			filter->spec_uploaded_revision = filter->spec_revision;
+		}
+		gs_effect_set_texture(filter->param_spec, filter->spec_texture);
+	}
+	if (filter->param_gamepad_available || filter->param_gamepad_info || filter->param_gamepad_buttons ||
+	    filter->param_gamepad_presses || filter->param_gamepad_axes || filter->param_gamepad_axes_c ||
+	    filter->param_gamepad_axes_clamped || filter->param_gamepad_data) {
+		struct sf_gamepad_snapshot gamepads;
+		sf_gamepad_get_snapshot(&gamepads);
+		if (filter->param_gamepad_data) {
+			const uint64_t frame = obs_get_video_frame_time();
+			if (!gamepad_texture || frame != gamepad_texture_frame) {
+				float pixels[SF_GAMEPAD_COUNT * SF_GAMEPAD_TEXTURE_WIDTH * 4];
+				sf_gamepad_pack_snapshot(&gamepads, pixels);
+				if (!gamepad_texture) {
+					const uint8_t *initial_data = (const uint8_t *)pixels;
+					gamepad_texture = gs_texture_create(SF_GAMEPAD_TEXTURE_WIDTH, SF_GAMEPAD_COUNT,
+								    GS_RGBA32F, 1, &initial_data, GS_DYNAMIC);
+				} else {
+					gs_texture_set_image(gamepad_texture, (const uint8_t *)pixels,
+							     SF_GAMEPAD_TEXTURE_WIDTH * 4 * sizeof(float), false);
+				}
+				gamepad_texture_frame = frame;
+			}
+			gs_effect_set_texture(filter->param_gamepad_data, gamepad_texture);
+		}
+		if (filter->param_gamepad_available)
+			gs_effect_set_int(filter->param_gamepad_available, gamepads.available);
+		if (filter->param_gamepad_info)
+			gs_effect_set_val(filter->param_gamepad_info, gamepads.info, sizeof(gamepads.info));
+		if (filter->param_gamepad_buttons)
+			gs_effect_set_val(filter->param_gamepad_buttons, gamepads.buttons, sizeof(gamepads.buttons));
+		if (filter->param_gamepad_presses)
+			gs_effect_set_val(filter->param_gamepad_presses, gamepads.presses, sizeof(gamepads.presses));
+		if (filter->param_gamepad_axes)
+			gs_effect_set_val(filter->param_gamepad_axes, gamepads.axes, sizeof(gamepads.axes));
+		if (filter->param_gamepad_axes_c)
+			gs_effect_set_val(filter->param_gamepad_axes_c, gamepads.axes_c, sizeof(gamepads.axes_c));
+		if (filter->param_gamepad_axes_clamped)
+			gs_effect_set_val(filter->param_gamepad_axes_clamped, gamepads.axes_clamped, sizeof(gamepads.axes_clamped));
+	}
+
+	// Update audio timeseries textures if audio is being used
+	if (uses_audio_bands(filter)) {
+		shader_filter_render_audio_timeseries_textures(filter);
+	}
 
 	if (filter->param_uv_scale != NULL) {
 		gs_effect_set_vec2(filter->param_uv_scale, &filter->uv_scale);
@@ -3007,6 +4157,133 @@ void shader_filter_set_effect_params(struct shader_filter_data *filter)
 	if (filter->param_audio_magnitude != NULL) {
 		gs_effect_set_float(filter->param_audio_magnitude, filter->audio_magnitude);
 	}
+	if (filter->param_energy != NULL)
+		gs_effect_set_float(filter->param_energy, filter->energy);
+	if (filter->param_e_bass != NULL)
+		gs_effect_set_float(filter->param_e_bass, filter->e_bass);
+	if (filter->param_e_lows != NULL)
+		gs_effect_set_float(filter->param_e_lows, filter->e_lows);
+	if (filter->param_e_mids != NULL)
+		gs_effect_set_float(filter->param_e_mids, filter->e_mids);
+	if (filter->param_e_treb != NULL)
+		gs_effect_set_float(filter->param_e_treb, filter->e_treb);
+	if (filter->param_bass != NULL) {
+		gs_effect_set_float(filter->param_bass, filter->bass);
+	}
+	if (filter->param_lows != NULL) {
+		gs_effect_set_float(filter->param_lows, filter->lows);
+	}
+	if (filter->param_mids != NULL) {
+		gs_effect_set_float(filter->param_mids, filter->mids);
+	}
+	if (filter->param_treb != NULL) {
+		gs_effect_set_float(filter->param_treb, filter->treb);
+	}
+	if (filter->param_bass_c != NULL) {
+		gs_effect_set_float(filter->param_bass_c, filter->bass_c);
+	}
+	if (filter->param_lows_c != NULL) {
+		gs_effect_set_float(filter->param_lows_c, filter->lows_c);
+	}
+	if (filter->param_mids_c != NULL) {
+		gs_effect_set_float(filter->param_mids_c, filter->mids_c);
+	}
+	if (filter->param_treb_c != NULL) {
+		gs_effect_set_float(filter->param_treb_c, filter->treb_c);
+	}
+	if (filter->param_t_bass != NULL && filter->t_bass_render) {
+		gs_texture_t *t = gs_texrender_get_texture(filter->t_bass_render);
+		if (t)
+			gs_effect_set_texture(filter->param_t_bass, t);
+	}
+	if (filter->param_t_lows != NULL && filter->t_lows_render) {
+		gs_texture_t *t = gs_texrender_get_texture(filter->t_lows_render);
+		if (t)
+			gs_effect_set_texture(filter->param_t_lows, t);
+	}
+	if (filter->param_t_mids != NULL && filter->t_mids_render) {
+		gs_texture_t *t = gs_texrender_get_texture(filter->t_mids_render);
+		if (t)
+			gs_effect_set_texture(filter->param_t_mids, t);
+	}
+	if (filter->param_t_treb != NULL && filter->t_treb_render) {
+		gs_texture_t *t = gs_texrender_get_texture(filter->t_treb_render);
+		if (t)
+			gs_effect_set_texture(filter->param_t_treb, t);
+	}
+	// Set exponential falloff preset floats
+	if (filter->param_ef_bass_fast != NULL)
+		gs_effect_set_float(filter->param_ef_bass_fast, filter->ef_bass_fast);
+	if (filter->param_ef_bass_medium != NULL)
+		gs_effect_set_float(filter->param_ef_bass_medium, filter->ef_bass_medium);
+	if (filter->param_ef_bass_slow != NULL)
+		gs_effect_set_float(filter->param_ef_bass_slow, filter->ef_bass_slow);
+	if (filter->param_ef_bass_slug != NULL)
+		gs_effect_set_float(filter->param_ef_bass_slug, filter->ef_bass_slug);
+
+	if (filter->param_ef_lows_fast != NULL)
+		gs_effect_set_float(filter->param_ef_lows_fast, filter->ef_lows_fast);
+	if (filter->param_ef_lows_medium != NULL)
+		gs_effect_set_float(filter->param_ef_lows_medium, filter->ef_lows_medium);
+	if (filter->param_ef_lows_slow != NULL)
+		gs_effect_set_float(filter->param_ef_lows_slow, filter->ef_lows_slow);
+	if (filter->param_ef_lows_slug != NULL)
+		gs_effect_set_float(filter->param_ef_lows_slug, filter->ef_lows_slug);
+
+	if (filter->param_ef_mids_fast != NULL)
+		gs_effect_set_float(filter->param_ef_mids_fast, filter->ef_mids_fast);
+	if (filter->param_ef_mids_medium != NULL)
+		gs_effect_set_float(filter->param_ef_mids_medium, filter->ef_mids_medium);
+	if (filter->param_ef_mids_slow != NULL)
+		gs_effect_set_float(filter->param_ef_mids_slow, filter->ef_mids_slow);
+	if (filter->param_ef_mids_slug != NULL)
+		gs_effect_set_float(filter->param_ef_mids_slug, filter->ef_mids_slug);
+
+	if (filter->param_ef_treb_fast != NULL)
+		gs_effect_set_float(filter->param_ef_treb_fast, filter->ef_treb_fast);
+	if (filter->param_ef_treb_medium != NULL)
+		gs_effect_set_float(filter->param_ef_treb_medium, filter->ef_treb_medium);
+	if (filter->param_ef_treb_slow != NULL)
+		gs_effect_set_float(filter->param_ef_treb_slow, filter->ef_treb_slow);
+	if (filter->param_ef_treb_slug != NULL)
+		gs_effect_set_float(filter->param_ef_treb_slug, filter->ef_treb_slug);
+
+	// Set linear falloff preset floats
+	if (filter->param_lf_bass_fast != NULL)
+		gs_effect_set_float(filter->param_lf_bass_fast, filter->lf_bass_fast);
+	if (filter->param_lf_bass_medium != NULL)
+		gs_effect_set_float(filter->param_lf_bass_medium, filter->lf_bass_medium);
+	if (filter->param_lf_bass_slow != NULL)
+		gs_effect_set_float(filter->param_lf_bass_slow, filter->lf_bass_slow);
+	if (filter->param_lf_bass_slug != NULL)
+		gs_effect_set_float(filter->param_lf_bass_slug, filter->lf_bass_slug);
+
+	if (filter->param_lf_lows_fast != NULL)
+		gs_effect_set_float(filter->param_lf_lows_fast, filter->lf_lows_fast);
+	if (filter->param_lf_lows_medium != NULL)
+		gs_effect_set_float(filter->param_lf_lows_medium, filter->lf_lows_medium);
+	if (filter->param_lf_lows_slow != NULL)
+		gs_effect_set_float(filter->param_lf_lows_slow, filter->lf_lows_slow);
+	if (filter->param_lf_lows_slug != NULL)
+		gs_effect_set_float(filter->param_lf_lows_slug, filter->lf_lows_slug);
+
+	if (filter->param_lf_mids_fast != NULL)
+		gs_effect_set_float(filter->param_lf_mids_fast, filter->lf_mids_fast);
+	if (filter->param_lf_mids_medium != NULL)
+		gs_effect_set_float(filter->param_lf_mids_medium, filter->lf_mids_medium);
+	if (filter->param_lf_mids_slow != NULL)
+		gs_effect_set_float(filter->param_lf_mids_slow, filter->lf_mids_slow);
+	if (filter->param_lf_mids_slug != NULL)
+		gs_effect_set_float(filter->param_lf_mids_slug, filter->lf_mids_slug);
+
+	if (filter->param_lf_treb_fast != NULL)
+		gs_effect_set_float(filter->param_lf_treb_fast, filter->lf_treb_fast);
+	if (filter->param_lf_treb_medium != NULL)
+		gs_effect_set_float(filter->param_lf_treb_medium, filter->lf_treb_medium);
+	if (filter->param_lf_treb_slow != NULL)
+		gs_effect_set_float(filter->param_lf_treb_slow, filter->lf_treb_slow);
+	if (filter->param_lf_treb_slug != NULL)
+		gs_effect_set_float(filter->param_lf_treb_slug, filter->lf_treb_slug);
 	if (filter->param_loops != NULL) {
 		gs_effect_set_int(filter->param_loops, filter->loops);
 	}
@@ -3603,16 +4880,30 @@ OBS_MODULE_USE_DEFAULT_LOCALE("obs-shaderfilter", "en-US")
 bool obs_module_load(void)
 {
 	blog(LOG_INFO, "[obs-shaderfilter] loaded version %s", PROJECT_VERSION);
+	if (!sf_gamepad_init())
+		blog(LOG_WARNING, "[obs-shaderfilter] Continuing with neutral gamepad input");
 	obs_register_source(&shader_filter);
 	obs_register_source(&shader_transition);
 
 	return true;
 }
 
-void obs_module_unload(void) {}
+void obs_module_unload(void)
+{
+	sf_tools_shutdown();
+	sf_gamepad_shutdown();
+	if (gamepad_texture) {
+		obs_enter_graphics();
+		gs_texture_destroy(gamepad_texture);
+		gamepad_texture = NULL;
+		gamepad_texture_frame = UINT64_MAX;
+		obs_leave_graphics();
+	}
+}
 
 void obs_module_post_load()
 {
+	sf_tools_init();
 	if (obs_get_module("move-transition") == NULL)
 		return;
 	proc_handler_t *ph = obs_get_proc_handler();

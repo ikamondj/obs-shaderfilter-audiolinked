@@ -2,18 +2,22 @@
 
 ## Introduction
 
-The obs-shaderfilter plugin for [OBS Studio](http://obsproject.com/) is intended to allow users to apply 
-their own shaders to OBS sources. This theoretically makes possible some simple effects like drop shadows
-that can be implemented strictly in shader code. 
+For the complete shader input list, use the [code-reviewed variable reference](VARIABLE_REFERENCE.md).
+It includes types, declaration requirements, and runtime costs for built-in inputs,
+optional uniforms, controller helpers, custom parameters, and application settings.
 
-Please note that this plugin may expose a reasonable number of bugs in OBS, as it uses the shader parser and 
+The obs-shaderfilter plugin for [OBS Studio](http://obsproject.com/) is intended to allow users to apply
+their own shaders to OBS sources. This theoretically makes possible some simple effects like drop shadows
+that can be implemented strictly in shader code.
+
+Please note that this plugin may expose a reasonable number of bugs in OBS, as it uses the shader parser and
 the property system in somewhat unusual ways.
 
 ## Installation
 
 The binary package mirrors the structure of the OBS Studio installation directory, so you should be able to
-just drop its contents alongside an OBS Studio install (usually at C:\Program Files\obs-studio\). The 
-necessary files should look like this: 
+just drop its contents alongside an OBS Studio install (usually at C:\Program Files\obs-studio\). The
+necessary files should look like this:
 
     obs-studio
     |---data
@@ -40,23 +44,23 @@ necessary files should look like this:
 ## Usage
 
 The filter can be added to any source through the "Filters" option when right-clicking on a source. The name
-of the filter is "User-defined shader." 
+of the filter is "User-defined shader."
 
-Shaders can either be entered directly in a text box in the filter properties, or loaded from a file. To change 
+Shaders can either be entered directly in a text box in the filter properties, or loaded from a file. To change
 between the two modes, use the "Load shader text from file" toggle. If you are entering your shader text directly,
-note that you will need to use the "Reload effect" button to apply your changes. This can also be used to reload an external file if changes have been made. 
+note that you will need to use the "Reload effect" button to apply your changes. This can also be used to reload an external file if changes have been made.
 OBS shaders are written in OBS version of HLSL.
 
 The option is provided to render extra pixels on each side of the source. This is useful for effects like shadows
-that need to render outside the bounds of the original source. 
+that need to render outside the bounds of the original source.
 
-Normally, all that's required for OBS purposes is a pixel shader, so the plugin will wrap your shader text with a 
+Normally, all that's required for OBS purposes is a pixel shader, so the plugin will wrap your shader text with a
 standard template to add a basic vertex shader and other boilerplate. If you wish to customize the vertex shader
-or other parts of the effect for some reason, you can check the "Use Effect File (.effect)" option. 
+or other parts of the effect for some reason, you can check the "Use Effect File (.effect)" option.
 
 Any parameters you add to your shader (defined as `uniform` variables) will be detected by the plugin and exposed
 in the properties window to have their values set. Currently, only `int`, `float`, `bool`, `string`, `texture2d`, and `float4`
-parameters are supported. (`float4` parameters will be interpreted by the properties window as colors.) `string` is used for 
+parameters are supported. (`float4` parameters will be interpreted by the properties window as colors.) `string` is used for
 notes and instructions, but could be used in an effect or shader. Variable names are displayed in the GUI with underscore replaced with space `uniform float Variable_Name` becomes `Variable Name`.
 
 Version 2.0 and up support setting label, widget_type, minimum, maximum, step using annotations.
@@ -95,24 +99,24 @@ uniform string notes<
 
 #### Defaults
 
-You set default values as a normal assignment ```uniform string notes = 'my note';```, except for `float4` 
-which requires bracket \{\} notation like ```uniform float4 mycolor = { 0.75, 0.75, 0.75, 1.0};``` 
+You set default values as a normal assignment ```uniform string notes = 'my note';```, except for `float4`
+which requires bracket \{\} notation like ```uniform float4 mycolor = { 0.75, 0.75, 0.75, 1.0};```
 
 Note that if your shader has syntax errors and fails to compile, OBS does not provide any error messages; you will
 simply see your source render nothing at all. In many cases the output of the effect parser will be written to the
-OBS log file, which you can view with the Help -> Log Files menu in OBS. 
+OBS log file, which you can view with the Help -> Log Files menu in OBS.
 
 ### Standard parameters
 
 The plugin automatically populates a few parameters which your shader can use. If you choose to override the entire
-effect, be sure to define these as `uniform` variables and use them where necessary. (The filter should gracefully 
+effect, be sure to define these as `uniform` variables and use them where necessary. (The filter should gracefully
 handle these variables being missing, but the shader may malfunction.)
 
 * **`ViewProj`** (`float4x4`)&mdash;The view/projection matrix. (Standard for all OBS filters.)
-* **`image`** (`texture2d`)&mdash;The image to which the filter is being applied, either the original output of 
+* **`image`** (`texture2d`)&mdash;The image to which the filter is being applied, either the original output of
   the source or the output of the previous filter in the chain. (Standard for all OBS filters.)
 * **`prevous_image`** (`texture2d`)&mdash;The previous image to which the filter is being applied (2.5.0)
-* **`elapsed_time`** (`float`)&mdash;The time in seconds which has elapsed since the filter was created. Useful for 
+* **`elapsed_time`** (`float`)&mdash;The time in seconds which has elapsed since the filter was created. Useful for
   creating animations.
 * **`elapsed_time_start`** (`float`)&mdash;The time in seconds which has elapsed since the shader was loaded (2.4.0).
 * **`elapsed_time_show`** (`float`)&mdash;The time in seconds which has elapsed since the filter was shown (2.4.0).
@@ -135,7 +139,7 @@ handle these variables being missing, but the shader may malfunction.)
 * **`rand_instance_f`** (`float`)&mdash; a random float between 0 and 1. changes per instance on load.(1.2)
 * **`uv_offset`** (`float2`)&mdash;The offset which should be applied to the UV coordinates of the vertices. This is
   used in the standard vertex shader to draw extra pixels on the borders of the source.
-* **`uv_scale`** (`float2`)&mdash;The scale which should be applied to the UV coordinates of the vertices. This is 
+* **`uv_scale`** (`float2`)&mdash;The scale which should be applied to the UV coordinates of the vertices. This is
   used in the standard vertex shader to draw extra pixels on the borders of the source.
 * **`uv_size`** (`float2`)&mdash;The height and width of the screen.
 * **`uv_pixel_interval`** (`float2`)&mdash;This is the size in UV coordinates of an individual texel. You can use
@@ -146,6 +150,59 @@ handle these variables being missing, but the shader may malfunction.)
   More reactive to sudden sounds like drums.
 * **`audio_magnitude`** (`float`)&mdash;The RMS (Root Mean Square) audio level from the selected audio source, normalized to 0.0-1.0.
   Smoother representation of sustained audio levels.
+
+#### Audio Frequency Bands
+
+When you use any of the audio parameters in your shader, the filter automatically enables audio processing and makes the audio source selectable.
+
+Audio analysis is shared by source: filters selecting the same source reuse one capture and one set of results. The bands come from a lightweight time-domain crossover, are perceptually balanced for typical program audio, and are normalized to 0.0-1.0.
+
+* **`bass`** (`float`)&mdash;Energy from 30-120 Hz. Useful for kick drums and low-end effects.
+* **`lows`** (`float`)&mdash;Energy from 120-500 Hz.
+* **`mids`** (`float`)&mdash;Energy from 500-3000 Hz. Often used for vocals and instruments.
+* **`treb`** (`float`)&mdash;Energy from 3000-13000 Hz. Useful for cymbals and brightness.
+
+The cumulative counters, time-series textures, and exponential and linear falloff values are all derived from these four shared band values.
+
+#### Audio Accessor Functions
+
+* **`acc(float speed)`** (`float4`)&mdash;"Accumulation Function" Returns a counter value based on audio energy with smooth decay. Takes a speed parameter (0.0-1.0) to control how quickly the counter resets. Returns a `float4` where each component corresponds to a frequency band counter: `.x` = bass counter, `.y` = lows counter, `.z` = mids counter, `.w` = treb counter. This is the recommended way to use audio band counters.
+
+  Example: `float bass_beat = acc(0.5).x;`
+
+* **`cu_bass(float speed)`**, **`cu_lows(float speed)`**, **`cu_mids(float speed)`**, **`cu_treb(float speed)`** (`float`)&mdash;Convenience functions that extract individual frequency band counters. Each takes a speed parameter and returns the fractional counter value for that frequency band. These are wrappers around `acc()` for cleaner, more readable code.
+
+  Example: `float bass_counter = cu_bass(0.5); float treb_counter = cu_treb(0.3);`
+
+**Note:** Internal counter parameters `bass_c`, `lows_c`, `mids_c`, and `treb_c` are provided but not recommended for direct use, as they are harder to work with than the `acc()` or `cu_*()` convenience functions. Unless you have a specific need to bypass these wrappers, use `acc()` or the `cu_*()` functions instead.
+
+#### Color Space Conversion Functions
+
+* **`rgb2hsv(float3 rgb)`** (`float3`)&mdash;Converts a color from RGB color space to HSV (Hue, Saturation, Value). Returns a `float3` where `.x` is hue (0.0-1.0), `.y` is saturation (0.0-1.0), and `.z` is value/brightness (0.0-1.0). Useful for color-based effects and manipulations.
+
+  Example: `float3 hsv = rgb2hsv(image_color);`
+
+* **`hsv2rgb(float3 hsv)`** (`float3`)&mdash;Converts a color from HSV color space to RGB. Takes a `float3` where `.x` is hue (0.0-1.0), `.y` is saturation (0.0-1.0), and `.z` is value (0.0-1.0). Returns the converted RGB color. Useful for creating effects based on hue shifts or saturation adjustments.
+
+  Example: `float3 rgb = hsv2rgb(float3(hue_value, 1.0, 1.0));`
+
+HSL conversions (`rgb2hsl`, `hsl2rgb`, `hsv2hsl`, `hsl2hsv`), four-dimensional
+simplex/Perlin/curl/Voronoi noise, and shared GLFW gamepad inputs are also available.
+OKLCH conversions are available in both directions for RGB, linear RGB, HSV,
+and HSL (for example, `rgb2oklch` and `oklch2rgb`). OKLCH uses `(L, C, h)` with
+hue in normalized turns; the RGB pair handles the sRGB transfer curve internally.
+See [the shader and gamepad helper reference](SHADER_HELPERS.md) for signatures,
+controller indices, accumulator semantics, examples, and build instructions.
+
+Audio bands use instantaneous, perceptually weighted block RMS. Use `linfoff`
+or `expfoff` for explicit per-band tails up to approximately 2.73 seconds;
+there is no global falloff slider. Controller connections, disconnections, and button presses
+appear in the OBS log; axis movement and held buttons do not generate input logs.
+
+**Tools → Shaderfilter Controller Lookup** shows connected controller IDs as tabs.
+Scroll a controller's page to see every button and axis, cumulative press counts,
+integrated axis values, and the last pressed button. Stick XY components and
+triggers use the same normalized `[-1,1]` values in shaders and the inspector.
 
 ### Optional Preprocessing Macros
 
@@ -158,7 +215,7 @@ The plugin provides some optional pre-processing macros.
 ### Example shaders
 
 Several examples are provided in the plugin's *data/examples* folder. These can be used as-is for some hopefully
-useful common tasks, or used as a reference in developing your own shaders. Note that the *.shader* and *.effect* 
+useful common tasks, or used as a reference in developing your own shaders. Note that the *.shader* and *.effect*
 extensions are for clarity only, and have no specific meaning to the plugin. Text files with any extension can be
 loaded. In a standard, *.effect* files include a vertex shader and *.shader* only has a pixel shader.
 
@@ -237,8 +294,9 @@ I recommend *.shader* as they do not require `Use Effect File (.effect)` as pixe
 
 ## Building
 
-If you wish to build the obs-shaderfilter plugin from source, you should just need [CMake](https://cmake.org/) 
-and the OBS Studio libraries and headers.
+If you wish to build the obs-shaderfilter plugin from source, you should just need [CMake](https://cmake.org/)
+and the OBS Studio libraries and headers, Qt6, GLFW, and PFFFT. The pinned
+`vcpkg.json` supplies GLFW/PFFFT; see [dependency setup and test commands](SHADER_HELPERS.md#building-and-checking).
 
 * [obs-shaderfilter source repository](https://github.com/exeldro/obs-shaderfilter)
 * [OBS Studio source repository](https://github.com/obsproject/obs-studio)

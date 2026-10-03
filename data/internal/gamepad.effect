@@ -1,0 +1,113 @@
+// Packed vectors avoid scalar-array padding differences across OBS backends.
+uniform int gamepad_available;
+#ifdef OPENGL
+uniform texture2d gamepad_data;
+sampler_state gamepad_sampler {
+    Filter = Point;
+    AddressU = Clamp;
+    AddressV = Clamp;
+};
+
+float4 sf_gamepad_fetch(int controller, int column)
+{
+    return gamepad_data.SampleLevel(gamepad_sampler, float2((column + 0.5) / 19.0, (controller + 0.5) / 16.0), 0.0);
+}
+#else
+uniform int4 gamepad_info[16];
+uniform int4 gamepad_buttons[64];
+uniform int4 gamepad_presses[64];
+uniform float4 gamepad_axes[32];
+uniform float4 gamepad_axes_c[32];
+uniform float4 gamepad_axes_clamped[32];
+#endif
+
+bool gamepad_connected(int controller)
+{
+    if (controller < 0 || controller >= 16) return false;
+#ifdef OPENGL
+    return sf_gamepad_fetch(controller, 0).x != 0.0;
+#else
+    return gamepad_info[controller].x != 0;
+#endif
+}
+
+int gamepad_button(int controller, int button)
+{
+    if (controller < 0 || controller >= 16 || button < 0 || button >= 15) return 0;
+#ifdef OPENGL
+    return int(sf_gamepad_fetch(controller, 1 + button / 4)[button % 4]);
+#else
+    return gamepad_buttons[controller * 4 + button / 4][button % 4];
+#endif
+}
+
+int gamepad_last_button(int controller)
+{
+    if (controller < 0 || controller >= 16) return -1;
+#ifdef OPENGL
+    return int(sf_gamepad_fetch(controller, 0).y);
+#else
+    return gamepad_info[controller].y;
+#endif
+}
+
+int gamepad_press_count(int controller, int button)
+{
+    if (controller < 0 || controller >= 16 || button < 0 || button >= 15) return 0;
+#ifdef OPENGL
+    int low = int(sf_gamepad_fetch(controller, 5 + button / 4)[button % 4]);
+    int high = int(sf_gamepad_fetch(controller, 9 + button / 4)[button % 4]);
+    return high * 65536 + low;
+#else
+    return gamepad_presses[controller * 4 + button / 4][button % 4];
+#endif
+}
+
+float gamepad_axis(int controller, int axis)
+{
+    if (controller < 0 || controller >= 16 || axis < 0 || axis >= 6) return 0.0;
+#ifdef OPENGL
+    return sf_gamepad_fetch(controller, 13 + axis / 4)[axis % 4];
+#else
+    return gamepad_axes[controller * 2 + axis / 4][axis % 4];
+#endif
+}
+
+float gamepad_axis_deadzone(int controller, int axis, float deadzone)
+{
+    float value = gamepad_axis(controller, axis);
+    deadzone = saturate(deadzone);
+    if (deadzone >= 1.0 || abs(value) <= deadzone) return 0.0;
+    return sign(value) * (abs(value) - deadzone) / (1.0 - deadzone);
+}
+
+float gamepad_axis_cumulative(int controller, int axis)
+{
+    if (controller < 0 || controller >= 16 || axis < 0 || axis >= 6) return 0.0;
+#ifdef OPENGL
+    return sf_gamepad_fetch(controller, 15 + axis / 4)[axis % 4];
+#else
+    return gamepad_axes_c[controller * 2 + axis / 4][axis % 4];
+#endif
+}
+
+float gamepad_axis_clamped(int controller, int axis)
+{
+    if (controller < 0 || controller >= 16 || axis < 0 || axis >= 6) return 0.0;
+#ifdef OPENGL
+    return sf_gamepad_fetch(controller, 17 + axis / 4)[axis % 4];
+#else
+    return gamepad_axes_clamped[controller * 2 + axis / 4][axis % 4];
+#endif
+}
+
+float gamepad_axis_interval(int controller, int axis, float interval)
+{
+    if (interval <= 0.0 || interval > 166320.0) return 0.0;
+    return frac(gamepad_axis_cumulative(controller, axis) * 166320.0 / interval);
+}
+
+float gamepad_axis_acc(int controller, int axis, float rate)
+{
+    return gamepad_axis_interval(controller, axis, pow(166320.0, saturate(1.0 - rate)));
+}

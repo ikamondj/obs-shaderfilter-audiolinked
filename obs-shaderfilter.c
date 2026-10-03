@@ -1,22 +1,21 @@
 // Version 2.0 by Exeldro https://github.com/exeldro/obs-shaderfilter
 // Version 1.21 by Charles Fettinger https://github.com/Oncorporation/obs-shaderfilter
 // original version by nleseul https://github.com/nleseul/obs-shaderfilter
-#include <obs-module.h>
+#include "version.h"
+#include <float.h>
 #include <graphics/graphics.h>
 #include <graphics/image-file.h>
 #include <graphics/math-extra.h>
-
-#include <util/base.h>
-#include <util/dstr.h>
-#include <util/darray.h>
-#include <util/platform.h>
-#include <float.h>
 #include <limits.h>
-#include <stdio.h>
-#include <time.h>
-#include <string.h>
 #include <math.h>
-
+#include <obs-module.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <util/base.h>
+#include <util/darray.h>
+#include <util/dstr.h>
+#include <util/platform.h>
 #include <util/threading.h>
 #include "shader-gamepad.h"
 #include "shader-audio-energy.h"
@@ -32,6 +31,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <dlfcn.h>
 #include <sys/time.h>
 #endif
 
@@ -46,6 +46,35 @@ static move_get_transition_filter_t move_get_transition_filter = NULL;
 /* OpenGL controller upload shared by all filters; graphics thread only. */
 static gs_texture_t *gamepad_texture;
 static uint64_t gamepad_texture_frame = UINT64_MAX;
+
+struct image_file {
+	gs_texture_t *texture;
+	enum gs_color_format format;
+	uint32_t cx;
+	uint32_t cy;
+	bool is_animated_gif;
+	bool frame_updated;
+	bool loaded;
+};
+
+void *(*gs_image_file_create_func)(void) = NULL;
+void (*gs_image_file_free_func)(struct image_file *image) = NULL;
+void (*gs_image_file_init_func)(struct image_file *image, const char *file, enum gs_image_alpha_mode alpha_mode) = NULL;
+void (*gs_image_file_init_texture_func)(struct image_file *image) = NULL;
+bool (*gs_image_file_tick_func)(struct image_file *image, uint64_t elapsed_time_ns);
+void (*gs_image_file_update_texture_func)(struct image_file *image) = NULL;
+
+void *gs_image_file4_create(void)
+{
+	return bzalloc(41336); //sizeof(gs_image_file4_t)
+}
+
+void *gs_image_file_ex_create(void)
+{
+	return bzalloc(72); //sizeof(gs_image_file_ex_t));
+}
+
+#define nullptr ((void *)0)
 
 static const char *effect_template_begin = "\n\
 uniform float4x4 ViewProj;\n\
@@ -284,13 +313,14 @@ struct effect_param_data {
 	struct dstr widget_type;
 	struct dstr group;
 	struct dstr path;
+	struct dstr tooltip;
 	DARRAY(int) option_values;
 	DARRAY(struct dstr) option_labels;
 
 	enum gs_shader_param_type type;
 	gs_eparam_t *param;
 
-	gs_image_file_t *image;
+	struct image_file *image;
 	gs_texrender_t *render;
 	obs_weak_source_t *source;
 
@@ -587,6 +617,7 @@ struct shader_filter_data {
 	struct audio_source_analysis *audio_analysis;
 
 	DARRAY(struct effect_param_data) stored_param_list;
+	uint64_t last_frame_time;
 };
 
 static void shader_filter_release_audio_analysis(struct shader_filter_data *filter);
@@ -773,7 +804,7 @@ static void shader_filter_clear_params(struct shader_filter_data *filter)
 		struct effect_param_data *param = (filter->stored_param_list.array + param_index);
 		if (param->image) {
 			obs_enter_graphics();
-			gs_image_file_free(param->image);
+			gs_image_file_free_func(param->image);
 			obs_leave_graphics();
 
 			bfree(param->image);
@@ -802,6 +833,7 @@ static void shader_filter_clear_params(struct shader_filter_data *filter)
 		dstr_free(&param->widget_type);
 		dstr_free(&param->group);
 		dstr_free(&param->path);
+		dstr_free(&param->tooltip);
 		da_free(param->option_values);
 		for (size_t i = 0; i < param->option_labels.num; i++) {
 			dstr_free(&param->option_labels.array[i]);
@@ -1181,6 +1213,8 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 					dstr_copy(&cached_data->widget_type, (const char *)annotation_default);
 				} else if (strcmp(info.name, "group") == 0 && info.type == GS_SHADER_PARAM_STRING) {
 					dstr_copy(&cached_data->group, (const char *)annotation_default);
+				} else if (strcmp(info.name, "tooltip") == 0 && info.type == GS_SHADER_PARAM_STRING) {
+					dstr_copy(&cached_data->tooltip, (const char *)annotation_default);
 				} else if (strcmp(info.name, "minimum") == 0) {
 					if (info.type == GS_SHADER_PARAM_FLOAT || info.type == GS_SHADER_PARAM_VEC2 ||
 					    info.type == GS_SHADER_PARAM_VEC3 || info.type == GS_SHADER_PARAM_VEC4) {
@@ -3299,6 +3333,12 @@ static bool uses_audio(struct shader_filter_data *filter)
 	return filter->param_spec || filter->param_audio_magnitude || filter->param_audio_peak || uses_audio_bands(filter);
 }
 
+static inline void shader_filter_set_tooltip(obs_property_t *p, const struct dstr *tooltip)
+{
+	if (p && tooltip && tooltip->len)
+		obs_property_set_long_description(p, tooltip->array);
+}
+
 static obs_properties_t *shader_filter_properties(void *data)
 {
 	struct shader_filter_data *filter = data;
@@ -3349,8 +3389,8 @@ static obs_properties_t *shader_filter_properties(void *data)
 		obs_data_release(settings);
 	}
 
-	obs_properties_add_button(props, "reload_effect", obs_module_text("ShaderFilter.ReloadEffect"),
-				  shader_filter_reload_effect_clicked);
+	obs_properties_add_button2(props, "reload_effect", obs_module_text("ShaderFilter.ReloadEffect"),
+				   shader_filter_reload_effect_clicked, data);
 
 	if (filter && (uses_audio(filter))) {
 		obs_property_t *audio_source = obs_properties_add_list(props, "audio_source", "Audio source", OBS_COMBO_TYPE_LIST,
@@ -3400,9 +3440,10 @@ static obs_properties_t *shader_filter_properties(void *data)
 		}
 		if (!group)
 			group = props;
+		obs_property_t *p = NULL;
 		switch (param->type) {
 		case GS_SHADER_PARAM_BOOL:
-			obs_properties_add_bool(group, param_name, display_name.array);
+			p = obs_properties_add_bool(group, param_name, display_name.array);
 			break;
 		case GS_SHADER_PARAM_FLOAT: {
 			double range_min = param->minimum.f;
@@ -3415,9 +3456,10 @@ static obs_properties_t *shader_filter_properties(void *data)
 			}
 			obs_properties_remove_by_name(props, param_name);
 			if (widget_type != NULL && strcmp(widget_type, "slider") == 0) {
-				obs_properties_add_float_slider(group, param_name, display_name.array, range_min, range_max, step);
+				p = obs_properties_add_float_slider(group, param_name, display_name.array, range_min, range_max,
+								    step);
 			} else {
-				obs_properties_add_float(group, param_name, display_name.array, range_min, range_max, step);
+				p = obs_properties_add_float(group, param_name, display_name.array, range_min, range_max, step);
 			}
 			break;
 		}
@@ -3433,15 +3475,16 @@ static obs_properties_t *shader_filter_properties(void *data)
 			obs_properties_remove_by_name(props, param_name);
 
 			if (widget_type != NULL && strcmp(widget_type, "slider") == 0) {
-				obs_properties_add_int_slider(group, param_name, display_name.array, range_min, range_max, step);
+				p = obs_properties_add_int_slider(group, param_name, display_name.array, range_min, range_max,
+								  step);
 			} else if (widget_type != NULL && strcmp(widget_type, "select") == 0) {
-				obs_property_t *plist = obs_properties_add_list(group, param_name, display_name.array,
-										OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+				p = obs_properties_add_list(group, param_name, display_name.array, OBS_COMBO_TYPE_LIST,
+							    OBS_COMBO_FORMAT_INT);
 				for (size_t i = 0; i < param->option_values.num; i++) {
-					obs_property_list_add_int(plist, option_labels[i].array, options[i]);
+					obs_property_list_add_int(p, option_labels[i].array, options[i]);
 				}
 			} else {
-				obs_properties_add_int(group, param_name, display_name.array, range_min, range_max, step);
+				p = obs_properties_add_int(group, param_name, display_name.array, range_min, range_max, step);
 			}
 			break;
 		}
@@ -3462,24 +3505,28 @@ static obs_properties_t *shader_filter_properties(void *data)
 
 			for (size_t i = 0; i < 2; i++) {
 				dstr_printf(&sources_name, "%s_%zu", param_name, i);
+				obs_property_t *sub = NULL;
 				if (i < param->option_labels.num) {
 					if (slider) {
-						obs_properties_add_float_slider(group, sources_name.array,
-										param->option_labels.array[i].array, range_min,
-										range_max, step);
+						sub = obs_properties_add_float_slider(group, sources_name.array,
+										      param->option_labels.array[i].array,
+										      range_min, range_max, step);
 					} else {
-						obs_properties_add_float(group, sources_name.array,
-									 param->option_labels.array[i].array, range_min, range_max,
-									 step);
+						sub = obs_properties_add_float(group, sources_name.array,
+									       param->option_labels.array[i].array, range_min,
+									       range_max, step);
 					}
 				} else if (slider) {
 
-					obs_properties_add_float_slider(group, sources_name.array, display_name.array, range_min,
-									range_max, step);
+					sub = obs_properties_add_float_slider(group, sources_name.array, display_name.array,
+									      range_min, range_max, step);
 				} else {
-					obs_properties_add_float(group, sources_name.array, display_name.array, range_min,
-								 range_max, step);
+					sub = obs_properties_add_float(group, sources_name.array, display_name.array, range_min,
+								       range_max, step);
 				}
+				shader_filter_set_tooltip(sub, &param->tooltip);
+				if (i == 0)
+					p = sub;
 			}
 			dstr_free(&sources_name);
 
@@ -3497,18 +3544,22 @@ static obs_properties_t *shader_filter_properties(void *data)
 				}
 				for (size_t i = 0; i < 3; i++) {
 					dstr_printf(&sources_name, "%s_%zu", param_name, i);
+					obs_property_t *sub = NULL;
 					if (i < param->option_labels.num) {
-						obs_properties_add_float_slider(group, sources_name.array,
-										param->option_labels.array[i].array, range_min,
-										range_max, step);
+						sub = obs_properties_add_float_slider(group, sources_name.array,
+										      param->option_labels.array[i].array,
+										      range_min, range_max, step);
 					} else {
-						obs_properties_add_float_slider(group, sources_name.array, display_name.array,
-										range_min, range_max, step);
+						sub = obs_properties_add_float_slider(group, sources_name.array, display_name.array,
+										      range_min, range_max, step);
 					}
+					shader_filter_set_tooltip(sub, &param->tooltip);
+					if (i == 0)
+						p = sub;
 				}
 				dstr_free(&sources_name);
 			} else {
-				obs_properties_add_color(group, param_name, display_name.array);
+				p = obs_properties_add_color(group, param_name, display_name.array);
 			}
 			break;
 		case GS_SHADER_PARAM_VEC4:
@@ -3523,56 +3574,62 @@ static obs_properties_t *shader_filter_properties(void *data)
 				}
 				for (size_t i = 0; i < 4; i++) {
 					dstr_printf(&sources_name, "%s_%zu", param_name, i);
+					obs_property_t *sub = NULL;
 					if (i < param->option_labels.num) {
-						obs_properties_add_float_slider(group, sources_name.array,
-										param->option_labels.array[i].array, range_min,
-										range_max, step);
+						sub = obs_properties_add_float_slider(group, sources_name.array,
+										      param->option_labels.array[i].array,
+										      range_min, range_max, step);
 					} else {
-						obs_properties_add_float_slider(group, sources_name.array, display_name.array,
-										range_min, range_max, step);
+						sub = obs_properties_add_float_slider(group, sources_name.array, display_name.array,
+										      range_min, range_max, step);
 					}
+					shader_filter_set_tooltip(sub, &param->tooltip);
+					if (i == 0)
+						p = sub;
 				}
 				dstr_free(&sources_name);
 			} else {
-				obs_properties_add_color_alpha(group, param_name, display_name.array);
+				p = obs_properties_add_color_alpha(group, param_name, display_name.array);
 			}
 			break;
 		case GS_SHADER_PARAM_TEXTURE:
 			if (widget_type != NULL && strcmp(widget_type, "source") == 0) {
 				dstr_init_copy_dstr(&sources_name, &param->name);
 				dstr_cat(&sources_name, "_source");
-				obs_property_t *p = obs_properties_add_list(group, sources_name.array, display_name.array,
-									    OBS_COMBO_TYPE_EDITABLE, OBS_COMBO_FORMAT_STRING);
+				p = obs_properties_add_list(group, sources_name.array, display_name.array, OBS_COMBO_TYPE_EDITABLE,
+							    OBS_COMBO_FORMAT_STRING);
 				dstr_free(&sources_name);
 				obs_enum_sources(add_source_to_list, p);
 				obs_enum_scenes(add_source_to_list, p);
 				obs_property_list_insert_string(p, 0, "", "");
 
 			} else if (widget_type != NULL && strcmp(widget_type, "file") == 0) {
-				obs_properties_add_path(group, param_name, display_name.array, OBS_PATH_FILE,
-							shader_filter_texture_file_filter, NULL);
+				p = obs_properties_add_path(group, param_name, display_name.array, OBS_PATH_FILE,
+							    shader_filter_texture_file_filter, NULL);
 			} else {
 				dstr_init_copy_dstr(&sources_name, &param->name);
 				dstr_cat(&sources_name, "_source");
-				obs_property_t *p = obs_properties_add_list(group, sources_name.array, display_name.array,
-									    OBS_COMBO_TYPE_EDITABLE, OBS_COMBO_FORMAT_STRING);
+				obs_property_t *src = obs_properties_add_list(group, sources_name.array, display_name.array,
+									      OBS_COMBO_TYPE_EDITABLE, OBS_COMBO_FORMAT_STRING);
 				dstr_free(&sources_name);
-				obs_property_list_add_string(p, "", "");
-				obs_enum_sources(add_source_to_list, p);
-				obs_enum_scenes(add_source_to_list, p);
-				obs_properties_add_path(group, param_name, display_name.array, OBS_PATH_FILE,
-							shader_filter_texture_file_filter, NULL);
+				obs_property_list_add_string(src, "", "");
+				obs_enum_sources(add_source_to_list, src);
+				obs_enum_scenes(add_source_to_list, src);
+				shader_filter_set_tooltip(src, &param->tooltip);
+				p = obs_properties_add_path(group, param_name, display_name.array, OBS_PATH_FILE,
+							    shader_filter_texture_file_filter, NULL);
 			}
 			break;
 		case GS_SHADER_PARAM_STRING:
 			if (widget_type != NULL && strcmp(widget_type, "info") == 0) {
-				obs_properties_add_text(group, param_name, display_name.array, OBS_TEXT_INFO);
+				p = obs_properties_add_text(group, param_name, display_name.array, OBS_TEXT_INFO);
 			} else {
-				obs_properties_add_text(group, param_name, display_name.array, OBS_TEXT_MULTILINE);
+				p = obs_properties_add_text(group, param_name, display_name.array, OBS_TEXT_MULTILINE);
 			}
 			break;
 		default:;
 		}
+		shader_filter_set_tooltip(p, &param->tooltip);
 		dstr_free(&display_name);
 	}
 	da_free(groups);
@@ -3783,7 +3840,10 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 				}
 				obs_source_release(source);
 				if (param->image) {
-					gs_image_file_free(param->image);
+					obs_enter_graphics();
+					gs_image_file_free_func(param->image);
+					obs_leave_graphics();
+					bfree(param->image);
 					param->image = NULL;
 				}
 				dstr_free(&param->path);
@@ -3812,22 +3872,23 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 				}
 				path = obs_data_get_string(settings, param_name);
 				bool n = false;
-				if (param->image == NULL) {
-					param->image = bzalloc(sizeof(gs_image_file_t));
+				if (param->image == NULL && gs_image_file_create_func) {
+					param->image = gs_image_file_create_func();
 					n = true;
 				}
 				if (n || !path || !param->path.array || strcmp(path, param->path.array) != 0) {
-
-					if (!n) {
+					if (param->image) {
+						if (!n) {
+							obs_enter_graphics();
+							gs_image_file_free_func(param->image);
+							obs_leave_graphics();
+						}
+						gs_image_file_init_func(param->image, path, GS_IMAGE_ALPHA_PREMULTIPLY_SRGB);
+						dstr_copy(&param->path, path);
 						obs_enter_graphics();
-						gs_image_file_free(param->image);
+						gs_image_file_init_texture_func(param->image);
 						obs_leave_graphics();
 					}
-					gs_image_file_init(param->image, path);
-					dstr_copy(&param->path, path);
-					obs_enter_graphics();
-					gs_image_file_init_texture(param->image);
-					obs_leave_graphics();
 				}
 				obs_source_t *old_source = obs_weak_source_get_source(param->source);
 				if (old_source) {
@@ -3923,12 +3984,43 @@ static void shader_filter_tick(void *data, float seconds)
 
 	filter->output_rendered = false;
 	filter->input_rendered = false;
+
+	if (gs_image_file_tick_func) {
+		uint64_t frame_time = obs_get_video_frame_time();
+		if (filter->last_frame_time) {
+			bool g = false;
+			uint64_t elapsed = frame_time - filter->last_frame_time;
+			size_t param_count = filter->stored_param_list.num;
+			for (size_t param_index = 0; param_index < param_count; param_index++) {
+				struct effect_param_data *param = (filter->stored_param_list.array + param_index);
+				if (!param->image)
+					continue;
+
+				bool updated = gs_image_file_tick_func(param->image, elapsed);
+				if (updated) {
+					if (!g) {
+						obs_enter_graphics();
+						g = true;
+					}
+					gs_image_file_update_texture_func(param->image);
+				}
+			}
+			if (g) {
+				obs_leave_graphics();
+			}
+		}
+		filter->last_frame_time = frame_time;
+	}
 }
 
-gs_texrender_t *create_or_reset_texrender(gs_texrender_t *render)
+gs_texrender_t *create_or_reset_texrender(gs_texrender_t *render, const enum gs_color_format format)
 {
+	if (render && gs_texrender_get_format(render) != format) {
+		gs_texrender_destroy(render);
+		render = NULL;
+	}
 	if (!render) {
-		render = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+		render = gs_texrender_create(format, GS_ZS_NONE);
 	} else {
 		gs_texrender_reset(render);
 	}
@@ -3962,7 +4054,7 @@ static void get_input_source(struct shader_filter_data *filter)
 	}
 
 	// Set up our input_texrender to catch the output texture.
-	filter->input_texrender = create_or_reset_texrender(filter->input_texrender);
+	filter->input_texrender = create_or_reset_texrender(filter->input_texrender, format);
 
 	// Start the rendering process with our correct color space params,
 	// And set up your texrender to recieve the created texture.
@@ -4404,6 +4496,20 @@ static inline void build_sprite_norm(struct gs_vb_data *data, float fcx, float f
 	build_sprite(data, fcx, fcy, 0.0f, 1.0f, 0.0f, 1.0f);
 }
 
+static enum gs_color_space shader_filter_get_color_space(void *data, size_t count, const enum gs_color_space *preferred_spaces)
+{
+	UNUSED_PARAMETER(count);
+	UNUSED_PARAMETER(preferred_spaces);
+	struct shader_filter_data *filter = data;
+	obs_source_t *target = obs_filter_get_target(filter->context);
+	const enum gs_color_space potential_spaces[] = {
+		GS_CS_SRGB,
+		GS_CS_SRGB_16F,
+		GS_CS_709_EXTENDED,
+	};
+	return obs_source_get_color_space(target, OBS_COUNTOF(potential_spaces), potential_spaces);
+}
+
 static void render_shader(struct shader_filter_data *filter, float f, obs_source_t *filter_to)
 {
 	gs_texture_t *texture = gs_texrender_get_texture(filter->input_texrender);
@@ -4416,7 +4522,10 @@ static void render_shader(struct shader_filter_data *filter, float f, obs_source
 		filter->output_texrender = filter->previous_output_texrender;
 		filter->previous_output_texrender = temp;
 	}
-	filter->output_texrender = create_or_reset_texrender(filter->output_texrender);
+
+	enum gs_color_space space = shader_filter_get_color_space(filter, 0, NULL);
+	enum gs_color_format format = gs_get_format_from_space(space);
+	filter->output_texrender = create_or_reset_texrender(filter->output_texrender, format);
 
 	if (filter->param_image)
 		gs_effect_set_texture(filter->param_image, texture);
@@ -4429,7 +4538,6 @@ static void render_shader(struct shader_filter_data *filter, float f, obs_source
 
 	if (f > 0.0f) {
 		if (filter_to) {
-
 			struct shader_filter_data *filter2 = obs_obj_get_data(filter_to);
 			for (size_t i = 0; i < filter->stored_param_list.num; i++) {
 				struct effect_param_data *param = (filter->stored_param_list.array + i);
@@ -4604,20 +4712,6 @@ static uint32_t shader_filter_getheight(void *data)
 static void shader_filter_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_string(settings, "shader_text", effect_template_default_image_shader);
-}
-
-static enum gs_color_space shader_filter_get_color_space(void *data, size_t count, const enum gs_color_space *preferred_spaces)
-{
-	UNUSED_PARAMETER(count);
-	UNUSED_PARAMETER(preferred_spaces);
-	struct shader_filter_data *filter = data;
-	obs_source_t *target = obs_filter_get_target(filter->context);
-	const enum gs_color_space potential_spaces[] = {
-		GS_CS_SRGB,
-		GS_CS_SRGB_16F,
-		GS_CS_709_EXTENDED,
-	};
-	return obs_source_get_color_space(target, OBS_COUNTOF(potential_spaces), potential_spaces);
 }
 
 void shader_filter_param_source_action(void *data, void (*action)(obs_source_t *source))
@@ -4880,11 +4974,41 @@ OBS_MODULE_USE_DEFAULT_LOCALE("obs-shaderfilter", "en-US")
 bool obs_module_load(void)
 {
 	blog(LOG_INFO, "[obs-shaderfilter] loaded version %s", PROJECT_VERSION);
+
+#ifdef _WIN32
+	void *dl = os_dlopen("obs");
+#else
+	void *dl = dlopen(nullptr, RTLD_LAZY);
+#endif
+	if (dl) {
+		if (obs_get_version() >= MAKE_SEMANTIC_VERSION(33, 0, 0)) {
+			gs_image_file_create_func = gs_image_file_ex_create;
+			gs_image_file_free_func = os_dlsym(dl, "gs_image_file_ex_free");
+			gs_image_file_init_func = os_dlsym(dl, "gs_image_file_ex_init");
+			gs_image_file_init_texture_func = os_dlsym(dl, "gs_image_file_ex_init_texture");
+			gs_image_file_tick_func = os_dlsym(dl, "gs_image_file_ex_tick");
+			gs_image_file_update_texture_func = os_dlsym(dl, "gs_image_file_ex_update_texture");
+		} else {
+			gs_image_file_create_func = gs_image_file4_create;
+			/* The v4 free/init_texture helpers are inline, not exported.
+			 * Their base image is the first member, so use the base API. */
+			gs_image_file_free_func = os_dlsym(dl, "gs_image_file_free");
+			gs_image_file_init_func = os_dlsym(dl, "gs_image_file4_init");
+			gs_image_file_init_texture_func = os_dlsym(dl, "gs_image_file_init_texture");
+			gs_image_file_tick_func = os_dlsym(dl, "gs_image_file4_tick");
+			gs_image_file_update_texture_func = os_dlsym(dl, "gs_image_file4_update_texture");
+		}
+		os_dlclose(dl);
+	}
+	if (!gs_image_file_create_func || !gs_image_file_free_func || !gs_image_file_init_func ||
+	    !gs_image_file_init_texture_func || !gs_image_file_tick_func || !gs_image_file_update_texture_func) {
+		blog(LOG_ERROR, "[obs-shaderfilter] Required OBS image API is unavailable");
+		return false;
+	}
 	if (!sf_gamepad_init())
 		blog(LOG_WARNING, "[obs-shaderfilter] Continuing with neutral gamepad input");
 	obs_register_source(&shader_filter);
 	obs_register_source(&shader_transition);
-
 	return true;
 }
 
